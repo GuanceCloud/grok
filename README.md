@@ -1,123 +1,65 @@
-[![Go Reference](https://pkg.go.dev/badge/github.com/vjeantet/grok.svg)](https://pkg.go.dev/github.com/vjeantet/grok)
-[![Build Status](https://travis-ci.org/vjeantet/grok.svg)](https://travis-ci.org/vjeantet/grok)
-[![Coverage Status](https://coveralls.io/repos/vjeantet/grok/badge.png?branch=master)](https://coveralls.io/r/vjeantet/grok?branch=master)
-[![Go Report Card](http://goreportcard.com/badge/vjeantet/grok)](http:/goreportcard.com/report/vjeantet/grok)
-[![Documentation Status](https://readthedocs.org/projects/grok-lib-for-golang/badge/?version=latest)](https://readthedocs.org/projects/grok-lib-for-golang/?badge=latest)
-
-
 # grok
-A simple library to parse grok patterns with Go.
 
-# Installation
-Make sure you have a working Go environment.
+This library is a fork of [github.com/vjeantet/grok](https://github.com/vjeantet/grok) that parses grok patterns in Go.
 
-```sh
-go get github.com/vjeantet/grok
-```
+## Usage
 
-# Use in your project
+### Denormalize and Compile
+
 ```go
-import "github.com/vjeantet/grok"
-```
-
-# Usage
-## Available patterns and custom ones
-By default this grok package contains only patterns you can see in patterns/grok-patterns file.
-
-When you want to add a custom pattern, use the grok.AddPattern(nameOfPattern, pattern), see the example folder for an example of usage.
-You also can load your custom patterns from a file (or folder) using grok.AddPatternsFromPath(path), or PatterndDir configuration.
-
-## Parse all or only named captures
-```go
-g, _ := grok.New()
-values, _  := g.Parse("%{COMMONAPACHELOG}", `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`)
-
-g, _ = grok.NewWithConfig(&grok.Config{NamedCapturesOnly: true})
-values2, _ := g.Parse("%{COMMONAPACHELOG}", `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`)
-```
-values is a map with all captured groups
-values2 contains only named captures
-
-# Examples
-```go
-package main
-
-import (
-	"fmt"
-
-	"github.com/vjeantet/grok"
-)
-
-func main() {
-	g, _ := grok.New()
-	values, _ := g.Parse("%{COMMONAPACHELOG}", `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`)
-
-	for k, v := range values {
-		fmt.Printf("%+15s: %s\n", k, v)
-	}
+denormalized, errs := DenormalizePatternsFromMap(CopyDefalutPatterns())
+if len(errs) == 0 {
+  g, err := CompilePattern("%{DAY:day}", denormalized)
+  if err == nil {
+    ret, _ := g.Run("Tue qds")
+  }
 }
 ```
 
-output:
-```
-       response: 404
-          bytes: 207
-       HOSTNAME: 127.0.0.1
-       USERNAME: -
-       MONTHDAY: 23
-        request: /index.php
-      BASE10NUM: 207
-           IPV6:
-           auth: -
-      timestamp: 23/Apr/2014:22:58:32 +0200
-           verb: GET
-    httpversion: 1.1
-           TIME: 22:58:32
-           HOUR: 22
-COMMONAPACHELOG: 127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207
-       clientip: 127.0.0.1
-             IP:
-          ident: -
-          MONTH: Apr
-           YEAR: 2014
-         SECOND: 32
-            INT: +0200
-           IPV4:
-         MINUTE: 58
-     rawrequest:
-```
+## Example
 
-# Example 2
 ```go
 package main
 
 import (
   "fmt"
 
-  "github.com/vjeantet/grok"
+  "github.com/GuanceCloud/grok"
 )
 
 func main() {
-  g, _ := grok.NewWithConfig(&grok.Config{NamedCapturesOnly: true})
-  values, _ := g.Parse("%{COMMONAPACHELOG}", `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`)
-
-  for k, v := range values {
+  de, errs := grok.DenormalizePatternsFromMap(grok.CopyDefalutPatterns())
+  if len(errs) != 0 {
+    fmt.Print(errs)
+    return
+  }
+  g, err := grok.CompilePattern("%{COMMONAPACHELOG}", de)
+  if err != nil {
+    fmt.Print(err)
+  }
+  ret, err := g.Run(`127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`)
+  if err != nil {
+    fmt.Print(err)
+  }
+  for k, v := range ret {
     fmt.Printf("%+15s: %s\n", k, v)
   }
 }
+
 ```
 
 output:
-```
+
+```txt
       timestamp: 23/Apr/2014:22:58:32 +0200
            verb: GET
-     rawrequest:
-          bytes: 207
-           auth: -
         request: /index.php
     httpversion: 1.1
+          bytes: 207
        response: 404
-COMMONAPACHELOG: 127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207
+               : 207
        clientip: 127.0.0.1
           ident: -
+           auth: -
+     rawrequest: 
 ```
