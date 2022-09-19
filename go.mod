@@ -1,4 +1,4 @@
-module github.com/grok
+module github.com/GuanceCloud/grok
 
 go 1.18
 
