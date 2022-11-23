@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	GTypeStr    = "str"
 	GTypeString = "string"
 	GTypeInt    = "int"
 	GTypeFloat  = "float"
@@ -88,7 +89,7 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 		// get the data type of the variable, if any
 		if len(names) > 2 {
 			switch names[2] {
-			case GTypeString, GTypeFloat, GTypeInt, GTypeBool:
+			case GTypeString, GTypeStr, GTypeFloat, GTypeInt, GTypeBool:
 				gPattern.varbType[alias] = names[2]
 			default:
 				return nil, fmt.Errorf("pattern: `%%{%s}`: invalid varb data type: `%s`",
