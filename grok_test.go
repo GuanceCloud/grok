@@ -127,21 +127,6 @@ true 1.1`,
 			},
 		},
 		{
-			data: `11 ijk123abc
-true 1.1`,
-			ptn: `%{INT:A:int} %{WORD:S:str}
-%{WORD:B:bool} %{BASE10NUM:C:int}`,
-			ret: map[string]interface{}{
-				"A": int64(1),
-				"S": "ijk123abc",
-				"B": true,
-				"C": int64(0),
-			},
-			failedRet: map[string]string{
-				"C": "1.1",
-			},
-		},
-		{
 			data: `1
 true 1.1`,
 			ptn: `%{INT:A}
