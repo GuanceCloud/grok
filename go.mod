@@ -3,6 +3,7 @@ module github.com/GuanceCloud/grok
 go 1.18
 
 require (
+	github.com/BurntSushi/rure-go v0.0.0-20200220204551-0338b655c065
 	github.com/spf13/cast v1.5.0
 	github.com/stretchr/testify v1.8.0
 )

@@ -53,7 +53,7 @@ func dfs(deP map[string]*GrokPattern, top map[string]*nodeP, startName string, s
 	if _, ok := deP[startName]; ok {
 		return nil
 	} else if len(start.cNode) == 0 {
-		if ptn, err := DenormalizePattern(start.cnt, PatternStorage{deP}); err != nil {
+		if ptn, err := DenormalizePattern(start.cnt, Patterns{deP}); err != nil {
 			return err
 		} else {
 			deP[startName] = ptn
@@ -73,7 +73,7 @@ func dfs(deP map[string]*GrokPattern, top map[string]*nodeP, startName string, s
 		}
 	}
 
-	if ptn, err := DenormalizePattern(start.cnt, PatternStorage{deP}); err != nil {
+	if ptn, err := DenormalizePattern(start.cnt, Patterns{deP}); err != nil {
 		return err
 	} else {
 		deP[startName] = ptn

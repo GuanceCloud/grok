@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+
 	"strings"
+	// regexp "github.com/wasilibs/go-re2"
 )
 
 const (
@@ -24,14 +25,14 @@ type GrokPattern struct {
 	varbType     map[string]string
 }
 
-type PatternStorageIface interface {
+type PatternsIface interface {
 	GetPattern(string) (*GrokPattern, bool)
 	SetPattern(string, *GrokPattern)
 }
 
-type PatternStorage []map[string]*GrokPattern
+type Patterns []map[string]*GrokPattern
 
-func (p PatternStorage) GetPattern(pattern string) (*GrokPattern, bool) {
+func (p Patterns) GetPattern(pattern string) (*GrokPattern, bool) {
 	for _, v := range p {
 		if gp, ok := v[pattern]; ok {
 			return gp, ok
@@ -40,7 +41,7 @@ func (p PatternStorage) GetPattern(pattern string) (*GrokPattern, bool) {
 	return nil, false
 }
 
-func (p PatternStorage) SetPattern(patternAlias string, gp *GrokPattern) {
+func (p Patterns) SetPattern(patternAlias string, gp *GrokPattern) {
 	if len(p) > 0 {
 		p[len(p)-1][patternAlias] = gp
 	}
@@ -63,7 +64,7 @@ func (g *GrokPattern) TypedVar() map[string]string {
 }
 
 // DenormalizePattern denormalizes the pattern to the regular expression.
-func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
+func DenormalizePattern(input string, denormalized ...PatternsIface) (
 	*GrokPattern, error,
 ) {
 	gPattern := &GrokPattern{
@@ -135,22 +136,6 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 
 	gPattern.denormalized = pattern
 	return gPattern, nil
-}
-
-func CompilePattern(input string, denomalized PatternStorageIface) (*GrokRegexp, error) {
-	gP, err := DenormalizePattern(input, denomalized)
-	if err != nil {
-		return nil, err
-	}
-	re, err := regexp.Compile(gP.denormalized)
-	if err != nil {
-		return nil, err
-	}
-
-	return &GrokRegexp{
-		grokPattern: gP,
-		re:          re,
-	}, nil
 }
 
 func LoadPatternsFromPath(path string) (map[string]string, error) {

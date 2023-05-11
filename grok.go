@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	regexpCgo "github.com/BurntSushi/rure-go"
+
 	"github.com/spf13/cast"
 )
 
@@ -19,10 +21,50 @@ var (
 
 type GrokRegexp struct {
 	grokPattern *GrokPattern
-	re          *regexp.Regexp
+	re          *regexpCgo.Regex
+	reStd       *regexp.Regexp
+
+	names map[string]int
 }
 
-func (g *GrokRegexp) Run(content interface{}, trimSpace bool) (map[string]string, error) {
+func (g *GrokRegexp) RunStd(content interface{}, trimSpace bool) (map[string]string, error) {
+	if g.reStd == nil {
+		return nil, fmt.Errorf("not complied")
+	}
+	result := map[string]string{}
+
+	switch v := content.(type) {
+	case []byte:
+		match := g.reStd.FindStringSubmatch(string(v))
+		if len(match) == 0 {
+			return nil, fmt.Errorf("no match")
+		}
+		for name, index := range g.names {
+			if trimSpace {
+				result[name] = strings.TrimSpace(match[index])
+			} else {
+				result[name] = match[index]
+			}
+		}
+	case string:
+		match := g.reStd.FindStringSubmatch(v)
+		if len(match) == 0 {
+			return nil, fmt.Errorf("no match")
+		}
+		for name, index := range g.names {
+			if name != "" {
+				if trimSpace {
+					result[name] = strings.TrimSpace(match[index])
+				} else {
+					result[name] = match[index]
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func (g *GrokRegexp) RunCgo(content interface{}, trimSpace bool) (map[string]string, error) {
 	if g.re == nil {
 		return nil, fmt.Errorf("not complied")
 	}
@@ -30,30 +72,40 @@ func (g *GrokRegexp) Run(content interface{}, trimSpace bool) (map[string]string
 
 	switch v := content.(type) {
 	case []byte:
-		match := g.re.FindSubmatch(v)
-		if len(match) == 0 {
+		c := g.re.NewCaptures()
+		if !g.re.CapturesBytes(c, v) {
 			return nil, fmt.Errorf("no match")
 		}
-		for i, name := range g.re.SubexpNames() {
+
+		for name, index := range g.names {
 			if name != "" {
-				if trimSpace {
-					result[name] = strings.TrimSpace(string(match[i]))
+				if s, e, ok := c.Group(index); ok {
+					if trimSpace {
+						result[name] = strings.TrimSpace((string(v[s:e])))
+					} else {
+						result[name] = string(v[s:e])
+					}
 				} else {
-					result[name] = string(match[i])
+					result[name] = ""
 				}
 			}
 		}
 	case string:
-		match := g.re.FindStringSubmatch(v)
-		if len(match) == 0 {
+		c := g.re.NewCaptures()
+		if !g.re.Captures(c, v) {
 			return nil, fmt.Errorf("no match")
 		}
-		for i, name := range g.re.SubexpNames() {
+
+		for name, index := range g.names {
 			if name != "" {
-				if trimSpace {
-					result[name] = strings.TrimSpace(match[i])
+				if s, e, ok := c.Group(index); ok {
+					if trimSpace {
+						result[name] = strings.TrimSpace((v[s:e]))
+					} else {
+						result[name] = v[s:e]
+					}
 				} else {
-					result[name] = match[i]
+					result[name] = ""
 				}
 			}
 		}
@@ -64,7 +116,7 @@ func (g *GrokRegexp) Run(content interface{}, trimSpace bool) (map[string]string
 func (g *GrokRegexp) RunWithTypeInfo(content interface{}, trimSpace bool) (map[string]interface{}, map[string]string, error) {
 	castDst := map[string]interface{}{}
 	castFail := map[string]string{}
-	ret, err := g.Run(content, trimSpace)
+	ret, err := g.RunCgo(content, trimSpace)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,4 +145,34 @@ func (g *GrokRegexp) RunWithTypeInfo(content interface{}, trimSpace bool) (map[s
 		}
 	}
 	return castDst, castFail, nil
+}
+
+func CompileGrokRegexp(input string, denomalized PatternsIface) (*GrokRegexp, error) {
+	gP, err := DenormalizePattern(input, denomalized)
+	if err != nil {
+		return nil, err
+	}
+	re, err := regexpCgo.Compile(gP.denormalized)
+	if err != nil {
+		return nil, err
+	}
+
+	names := map[string]int{}
+	for index, name := range re.CaptureNames() {
+		if name != "" {
+			names[name] = index
+		}
+	}
+
+	reStd, err := regexp.Compile(gP.denormalized)
+	if err != nil {
+		return nil, err
+	}
+
+	return &GrokRegexp{
+		grokPattern: gP,
+		re:          re,
+		reStd:       reStd,
+		names:       names,
+	}, nil
 }
