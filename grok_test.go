@@ -39,7 +39,7 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	ret, err := g.RunCgo("Tue qds", true)
+	ret, err := g.RunRust("Tue qds", true)
 	if err != nil {
 		t.Error(err)
 	}
@@ -61,7 +61,7 @@ func TestParseFromPathPattern(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	ret, err := g.RunCgo("Tue qds", true)
+	ret, err := g.RunRust("Tue qds", true)
 	if err != nil {
 		t.Error(err)
 	}
@@ -156,6 +156,72 @@ true 1.1`,
 	}
 }
 
+func BenchmarkRegexpLibrary(b *testing.B) {
+
+	cases := []struct {
+		name  string
+		regxp string
+		input string
+	}{
+		{
+			name:  "regexp1",
+			input: `2023-04-11 18:00:11.428 [ForkJoinPool.commonPool-worker-6] INFO  com.crt.loan.imc.es.impl.EsServiceImpl - [lambda$insert$0,191] loan-cmis-imc 2252660116907431929 672358609369876840   - [影像迁移]-mq信息推送成功,[{"applSeq":"1026202304111000489","applType":"C","channelId":"26","createTime":1681207211000,"custId":"889001302821","downloadAddress":"/opt/loan-fileload-service/imc/../ycms/20260701/1026202304111000489/fec3f5ef363e47daa9264a95d38866d3_007.jpg","esId":"7HjCb4cB-yoLUoESNeZv","filePath":"group2/M00/05/54/ChIB8mQ1L6uAPWyrAAdmZPIYOl0583.jpg","fileSourceType":"N","id":40,"idNo":"120223198208301638","idType":"20","imgType":"ID_PHOTO","outerNo":"1681207211275","productId":"PPD005","requestNo":"1645728441670459392","signType":"N","status":"SUCCESS","updateTime":1681207211425}]`,
+			regxp: "\\d{4}(?:-\\d{2}){2} \\d{2}(?:\\:\\d{2}){2}\\.\\d+\\s+\\[%{NOTSPACE:param2}\\]\\s+%{WORD:param3}\\s+[\\.a-zA-Z0-9]+\\s+(?:-|(?P<param5>.+?))\\s+\\[%{NOTSPACE:param6}\\]\\s+%{NOTSPACE:param7}\\s+" +
+				"(?P<param8>\\d+)\\s+(?P<param9>\\d+)\\s+(?:-|(?P<param10>.+?))\\s+",
+		},
+		{
+			name:  "nginx",
+			input: `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"`,
+			regxp: "%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \\[%{HTTPDATE:time}\\] \"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\" %{INT:status_code} %{INT:bytes}",
+		},
+		{
+			name:  "ngix-hard",
+			input: `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"`,
+			regxp: "%{IPORHOST:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \\[%{HTTPDATE:time}\\] \"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\" %{INT:status_code} %{INT:bytes}",
+		},
+	}
+
+	pathPatterns, err := LoadPatternsFromPath("./patterns")
+	if err != nil {
+		b.Fatal(err)
+	}
+	de, errs := DenormalizePatternsFromMap(pathPatterns)
+	if len(errs) != 0 {
+		b.Fatal(errs)
+	}
+
+	for _, v := range cases {
+		g, err := CompileGrokRegexp(v.regxp, Patterns{de})
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.Run(v.name+"-rust", func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				if _, err := g.RunRust(v.input, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+
+		b.Run(v.name+"-re2", func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				if _, err := g.RunRe2(v.input, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+
+		b.Run(v.name+"-std", func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				if _, err := g.RunStd(v.input, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkReCgo(b *testing.B) {
 	pathPatterns, err := LoadPatternsFromPath("./patterns")
 	if err != nil {
@@ -176,7 +242,7 @@ func BenchmarkReCgo(b *testing.B) {
 	data := `2023-04-11 18:00:11.428 [ForkJoinPool.commonPool-worker-6] INFO  com.crt.loan.imc.es.impl.EsServiceImpl - [lambda$insert$0,191] loan-cmis-imc 2252660116907431929 672358609369876840   - [影像迁移]-mq信息推送成功,[{"applSeq":"1026202304111000489","applType":"C","channelId":"26","createTime":1681207211000,"custId":"889001302821","downloadAddress":"/opt/loan-fileload-service/imc/../ycms/20260701/1026202304111000489/fec3f5ef363e47daa9264a95d38866d3_007.jpg","esId":"7HjCb4cB-yoLUoESNeZv","filePath":"group2/M00/05/54/ChIB8mQ1L6uAPWyrAAdmZPIYOl0583.jpg","fileSourceType":"N","id":40,"idNo":"120223198208301638","idType":"20","imgType":"ID_PHOTO","outerNo":"1681207211275","productId":"PPD005","requestNo":"1645728441670459392","signType":"N","status":"SUCCESS","updateTime":1681207211425}]`
 
 	for n := 0; n < b.N; n++ {
-		if _, err := g.RunCgo(data, true); err != nil {
+		if _, err := g.RunRust(data, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -200,9 +266,13 @@ func BenchmarkReCgo2(b *testing.B) {
 
 	data := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"`
 	for n := 0; n < b.N; n++ {
-		if _, err := g.RunCgo(data, true); err != nil {
+		if v, err := g.RunRust(data, true); err != nil {
+			b.Fatal(v)
 			b.Fatal(err)
 		}
+		//  else {
+		// b.Fatal(v)
+		// }
 	}
 }
 
@@ -224,7 +294,7 @@ func BenchmarkReCgo3(b *testing.B) {
 
 	data := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"`
 	for n := 0; n < b.N; n++ {
-		if _, err := g.RunCgo(data, true); err != nil {
+		if _, err := g.RunRust(data, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -274,9 +344,13 @@ func BenchmarkReStd2(b *testing.B) {
 
 	data := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36"`
 	for n := 0; n < b.N; n++ {
-		if _, err := g.RunStd(data, true); err != nil {
+		if v, err := g.RunStd(data, true); err != nil {
+			b.Fatal(v)
 			b.Fatal(err)
 		}
+		//  else {
+		// b.Fatal(v)
+		// }
 	}
 }
 
