@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,6 +20,32 @@ func TestDenormalizeGlobalPatterns(t *testing.T) {
 			}
 		}
 	}
+}
+
+func BenchmarkFindStringSubmatch(b *testing.B) {
+	re := regexp.MustCompile(`(\w+):(\w+):(\w+):(\w+):(\w+):(\w+)`)
+
+	str := "hello:world:foo:hello:world:foo"
+	b.Run("FindStringSubmatch", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			match := re.FindStringSubmatch(str)
+			if len(match) != 7 {
+				b.Fatal(match)
+			}
+		}
+	})
+
+	b.Run("FindStringSubmatchIndex", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			match := re.FindStringSubmatchIndex(str)
+			m := make([]string, 0, 6)
+			for j := 1; j < 7; j++ {
+				m = append(m, str[match[2*j]:match[2*j+1]])
+			}
+			_ = m
+		}
+	})
+
 }
 
 func TestParse(t *testing.T) {
@@ -43,8 +70,9 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if ret["day"] != "Tue" {
-		t.Fatalf("day should be 'Tue' have '%s'", ret["day"])
+
+	if v, ok := g.GetValByName("day", ret); !ok || v != "Tue" {
+		t.Fatalf("day should be 'Tue' have '%s'", v)
 	}
 }
 
@@ -65,8 +93,9 @@ func TestParseFromPathPattern(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if ret["day"] != "Tue" {
-		t.Fatalf("day should be 'Tue' have '%s'", ret["day"])
+
+	if v, ok := g.GetValByName("day", ret); !ok || v != "Tue" {
+		t.Fatalf("day should be 'Tue' have '%s'", v)
 	}
 }
 
@@ -79,36 +108,30 @@ func TestLoadPatternsFromPathErr(t *testing.T) {
 
 func TestRunWithTypeInfo(t *testing.T) {
 	tCase := []struct {
-		data      string
-		ptn       string
-		ret       map[string]interface{}
-		failedRet map[string]string
-		failed    bool
+		data string
+		ptn  string
+		ret  []any
 	}{
 		{
 			data: `1
 true 1.1`,
 			ptn: `%{INT:A:int}
 %{WORD:B:bool} %{BASE10NUM:C:float}`,
-			ret: map[string]interface{}{
-				"A": int64(1),
-				"B": true,
-				"C": float64(1.1),
+			ret: []any{
+				int64(1),
+				true,
+				float64(1.1),
 			},
-			failedRet: map[string]string{},
 		},
 		{
 			data: `1
 true 1.1`,
 			ptn: `%{INT:A:int}
 %{WORD:B:bool} %{BASE10NUM:C:int}`,
-			ret: map[string]interface{}{
-				"A": int64(1),
-				"B": true,
-				"C": int64(0),
-			},
-			failedRet: map[string]string{
-				"C": "1.1",
+			ret: []any{
+				int64(1),
+				true,
+				int64(0),
 			},
 		},
 		{
@@ -116,14 +139,11 @@ true 1.1`,
 true 1.1`,
 			ptn: `%{INT:A:int} %{WORD:S:string}
 %{WORD:B:bool} %{BASE10NUM:C:int}`,
-			ret: map[string]interface{}{
-				"A": int64(1),
-				"S": "ijk123abc",
-				"B": true,
-				"C": int64(0),
-			},
-			failedRet: map[string]string{
-				"C": "1.1",
+			ret: []any{
+				int64(1),
+				"ijk123abc",
+				true,
+				int64(0),
 			},
 		},
 		{
@@ -131,28 +151,26 @@ true 1.1`,
 true 1.1`,
 			ptn: `%{INT:A}
 %{WORD:B:bool} %{BASE10NUM:C:int}`,
-			ret: map[string]interface{}{
-				"A": "1",
-				"B": true,
-				"C": int64(0),
-			},
-			failedRet: map[string]string{
-				"C": "1.1",
+			ret: []any{
+				"1",
+				true,
+				int64(0),
 			},
 		},
 	}
 
 	for _, item := range tCase {
-		g, err := CompilePattern(item.ptn, PatternStorage{defalutDenormalizedPatterns})
-		if err != nil {
-			t.Fatal(err)
-		}
-		v, vf, err := g.RunWithTypeInfo(item.data, true)
-		if err != nil && !item.failed {
-			t.Fatal(err)
-		}
-		assert.Equal(t, item.ret, v)
-		assert.Equal(t, item.failedRet, vf)
+		t.Run(item.ptn, func(t *testing.T) {
+			g, err := CompilePattern(item.ptn, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+			v, err := g.RunWithTypeInfo(item.data, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, item.ret, v)
+		})
 	}
 }
 
