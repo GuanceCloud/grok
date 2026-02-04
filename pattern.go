@@ -104,12 +104,12 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 		}
 
 		if len(denormalized) == 0 {
-			return nil, fmt.Errorf("no pattern foud for %%{%s}", syntax)
+			return nil, fmt.Errorf("no pattern found for %%{%s}", syntax)
 		}
 
 		gP, ok := denormalized[0].GetPattern(syntax)
 		if !ok {
-			return nil, fmt.Errorf("no pattern foud for %%{%s}", syntax)
+			return nil, fmt.Errorf("no pattern found for %%{%s}", syntax)
 		}
 
 		for key, dtype := range gP.varbType {
