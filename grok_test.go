@@ -1602,6 +1602,49 @@ func BenchmarkRunStructuredLogLevelUTFRegexpPath(b *testing.B) {
 	}
 }
 
+func BenchmarkRunStructuredSyslogLine(b *testing.B) {
+	pattern := `%{SYSLOGTIMESTAMP:timestamp} %{SYSLOGHOST:logsource} %{GREEDYDATA:message}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	line := `Sep 18 19:30:23 derrick-ThinkPad-X230 consul[11803]: agent.server.connect: initialized primary datacenter`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, runErr := g.Run(line, true)
+		if runErr != nil {
+			b.Fatal(runErr)
+		}
+		if len(ret) == 0 {
+			b.Fatal("empty result")
+		}
+	}
+}
+
+func BenchmarkRunStructuredSyslogLineRegexpPath(b *testing.B) {
+	pattern := `%{SYSLOGTIMESTAMP:timestamp} %{SYSLOGHOST:logsource} %{GREEDYDATA:message}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	line := `Sep 18 19:30:23 derrick-ThinkPad-X230 consul[11803]: agent.server.connect: initialized primary datacenter`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, runErr := g.Run(line, true)
+		if runErr != nil {
+			b.Fatal(runErr)
+		}
+		if len(ret) == 0 {
+			b.Fatal("empty result")
+		}
+	}
+}
+
 func benchmarkBuildCaptureMapNoPrealloc(g *GrokRegexp, content string, trimSpace bool) (map[string]string, error) {
 	match, err := g.matchIndexes(content)
 	if err != nil {

@@ -329,6 +329,13 @@ func shouldUseStructuredMatcher(steps []structuredStep) bool {
 	if stats.greedyParserCount >= 2 && stats.optionalCount == 0 && stats.alternativeCount == 0 && stats.submatcherCount == 1 && stats.parserCount >= 8 {
 		return false
 	}
+	// Some flat syslog-style layouts now compile after adding literal `+/*`
+	// repetition support, but the current structured path still loses to
+	// regexp when the line is mostly nested subpatterns plus a single greedy
+	// tail. Keep the compiler support, but let these stay on regexp for now.
+	if stats.optionalCount == 0 && stats.greedyParserCount == 1 && stats.dataParserCount == 1 && stats.submatcherCount >= 4 && stats.alternativeCount >= 4 && stats.parserCount >= 18 {
+		return false
+	}
 	// Highly optional, nested patterns still require regexp-style backtracking
 	// to preserve capture alignment. PostgreSQL's default fixture is the
 	// representative case here.
@@ -690,6 +697,20 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 		flushLiteral()
 		steps = append(steps, structuredStep{literal: lit, optional: true, captureIndex: -1})
 	}
+	appendRepeatedLiteral := func(ch byte, allowEmpty bool) {
+		flushLiteral()
+		class := &asciiCharClass{}
+		class.table[ch] = true
+		steps = append(steps, structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredCharClass,
+				charClass:  class,
+				allowEmpty: allowEmpty,
+			},
+		})
+	}
 	for i := 0; i < len(raw); i++ {
 		switch raw[i] {
 		case '\\':
@@ -769,6 +790,11 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 		case ']', '{', '}', '+', '*', '?':
 			return nil, false
 		default:
+			if i+1 < len(raw) && (raw[i+1] == '+' || raw[i+1] == '*') {
+				appendRepeatedLiteral(raw[i], raw[i+1] == '*')
+				i++
+				continue
+			}
 			if i+1 < len(raw) && raw[i+1] == '?' {
 				appendOptionalLiteral(string(raw[i]))
 				i++

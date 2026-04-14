@@ -54,9 +54,18 @@ This verifies that the fast path still behaves well with UTF content and Unicode
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Structured LOGLEVEL with UTF message | 79.75 | 586.3 | 7.4x | 48/272 | 1/2 |
 
+## Common Pattern Micro Benchmarks
+
+These are small focused checks for common upstream grok layouts outside the Datakit fixture set.
+
+| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Structured SYSLOG line | 146.7 | 4513.0 | 30.8x | 48/113 | 1/2 |
+
 ## Notes
 
 - Near-parity cases today: `Apache error`, `Consul`, `PostgreSQL`, `MySQL slow log`, `TDengine 200`, and `TDengine 204`
 - Regex-only paths now avoid extra unnamed capture groups for plain `%{PATTERN}` expansion, which lowers `B/op` substantially on many real patterns even when the fast path is disabled
+- Structured literal parsing now understands repeated plain literals such as ` +` and ` *`, which lets common syslog-style upstream patterns reach the fast path without hard-coding product-specific matchers
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` but is still `19x-34x` faster than pure `regexp`
 - The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples
