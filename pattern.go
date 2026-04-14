@@ -2,12 +2,12 @@ package grok
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 const (
@@ -23,6 +23,21 @@ type GrokPattern struct {
 	denormalized string
 	varbType     map[string]string
 }
+
+type patternRef struct {
+	raw     string
+	syntax  string
+	alias   string
+	varType string
+}
+
+type compiledRegexpMeta struct {
+	re            *regexp.Regexp
+	subMatchNames SubMatchName
+	nameIndex     map[string]int
+}
+
+var compiledRegexpCache sync.Map
 
 type PatternStorageIface interface {
 	GetPattern(string) (*GrokPattern, bool)
@@ -62,6 +77,140 @@ func (g *GrokPattern) TypedVar() map[string]string {
 	return ret
 }
 
+func isWordByte(b byte) bool {
+	return b == '_' || ('0' <= b && b <= '9') || ('A' <= b && b <= 'Z') || ('a' <= b && b <= 'z')
+}
+
+func isPatternName(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+
+	for i := 0; i < len(s); i++ {
+		if isWordByte(s[i]) {
+			continue
+		}
+		if (s[i] == '.' || s[i] == '-') && i > 0 && i < len(s)-1 && isWordByte(s[i-1]) && isWordByte(s[i+1]) {
+			continue
+		}
+		return false
+	}
+
+	return true
+}
+
+func isPatternAlias(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+
+	for i := 0; i < len(s); i++ {
+		if isWordByte(s[i]) || s[i] == '.' || s[i] == '-' {
+			continue
+		}
+		return false
+	}
+
+	return true
+}
+
+func sanitizeAlias(alias string) string {
+	buf := make([]byte, len(alias))
+	for i := 0; i < len(alias); i++ {
+		if isWordByte(alias[i]) {
+			buf[i] = alias[i]
+		} else {
+			buf[i] = '_'
+		}
+	}
+	return string(buf)
+}
+
+func parsePatternRef(spec string) (patternRef, bool, error) {
+	ref := patternRef{raw: spec}
+
+	firstSep := strings.IndexByte(spec, ':')
+	if firstSep == -1 {
+		if !isPatternName(spec) {
+			return patternRef{}, false, nil
+		}
+		ref.syntax = spec
+		return ref, true, nil
+	}
+
+	ref.syntax = spec[:firstSep]
+	if !isPatternName(ref.syntax) {
+		return patternRef{}, false, nil
+	}
+
+	rest := spec[firstSep+1:]
+	if len(rest) == 0 {
+		return patternRef{}, false, nil
+	}
+
+	secondSep := strings.IndexByte(rest, ':')
+	if secondSep == -1 {
+		if !isPatternAlias(rest) {
+			return patternRef{}, false, nil
+		}
+		ref.alias = sanitizeAlias(rest)
+		return ref, true, nil
+	}
+
+	alias := rest[:secondSep]
+	if !isPatternAlias(alias) {
+		return patternRef{}, false, nil
+	}
+	ref.alias = sanitizeAlias(alias)
+
+	ref.varType = rest[secondSep+1:]
+	if len(ref.varType) == 0 || !isPatternAlias(ref.varType) {
+		return patternRef{}, false, nil
+	}
+
+	switch ref.varType {
+	case GTypeString, GTypeStr, GTypeInt, GTypeFloat, GTypeBool:
+		return ref, true, nil
+	default:
+		return patternRef{}, true, fmt.Errorf("invalid varb data type: `%s`", ref.varType)
+	}
+}
+
+func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error) error {
+	for i := 0; i < len(input); {
+		start := strings.Index(input[i:], "%{")
+		if start == -1 {
+			return nil
+		}
+		start += i
+
+		end := strings.IndexByte(input[start+2:], '}')
+		if end == -1 {
+			return nil
+		}
+		end += start + 2
+
+		ref, ok, err := parsePatternRef(input[start+2 : end])
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "invalid varb data type: ") {
+				return fmt.Errorf("pattern: `%%{%s}`: %w", input, err)
+			}
+			return err
+		}
+		if !ok {
+			i = end + 1
+			continue
+		}
+
+		if err := fn(start, end+1, ref); err != nil {
+			return err
+		}
+		i = end + 1
+	}
+
+	return nil
+}
+
 // DenormalizePattern denormalizes the pattern to the regular expression.
 func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 	*GrokPattern, error,
@@ -71,45 +220,17 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 		pattern:  input,
 	}
 
-	pattern := input
+	var builder strings.Builder
+	last := 0
 
-	for _, values := range normal.FindAllStringSubmatch(pattern, -1) {
-		if !valid.MatchString(values[1]) {
-			return nil, fmt.Errorf("invalid pattern `%%{%s}`", values[1])
-		}
-
-		names := strings.Split(values[1], ":")
-		syntax, alias := names[0], names[0]
-
-		// [a-zA-Z0-9_]
-		if len(names) > 1 {
-			alias = symbolic.ReplaceAllString(names[1], "_")
-		}
-
-		// get the data type of the variable, if any
-		if len(names) > 2 {
-			switch names[2] {
-			case GTypeString, GTypeStr:
-				gPattern.varbType[alias] = GTypeStr
-			case GTypeInt:
-				gPattern.varbType[alias] = GTypeInt
-			case GTypeFloat:
-				gPattern.varbType[alias] = GTypeFloat
-			case GTypeBool:
-				gPattern.varbType[alias] = GTypeBool
-			default:
-				return nil, fmt.Errorf("pattern: `%%{%s}`: invalid varb data type: `%s`",
-					pattern, names[2])
-			}
-		}
-
+	if err := walkPatternRefs(input, func(start, end int, ref patternRef) error {
 		if len(denormalized) == 0 {
-			return nil, fmt.Errorf("no pattern foud for %%{%s}", syntax)
+			return fmt.Errorf("no pattern foud for %%{%s}", ref.syntax)
 		}
 
-		gP, ok := denormalized[0].GetPattern(syntax)
+		gP, ok := denormalized[0].GetPattern(ref.syntax)
 		if !ok {
-			return nil, fmt.Errorf("no pattern foud for %%{%s}", syntax)
+			return fmt.Errorf("no pattern foud for %%{%s}", ref.syntax)
 		}
 
 		for key, dtype := range gP.varbType {
@@ -118,22 +239,44 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 			}
 		}
 
-		var buffer bytes.Buffer
-		if len(names) > 1 {
-			buffer.WriteString("(?P<")
-			buffer.WriteString(alias)
-			buffer.WriteString(">")
-			buffer.WriteString(gP.denormalized)
-			buffer.WriteString(")")
-		} else {
-			buffer.WriteString("(")
-			buffer.WriteString(gP.denormalized)
-			buffer.WriteString(")")
+		if ref.varType != "" {
+			switch ref.varType {
+			case GTypeString, GTypeStr:
+				gPattern.varbType[ref.alias] = GTypeStr
+			case GTypeInt:
+				gPattern.varbType[ref.alias] = GTypeInt
+			case GTypeFloat:
+				gPattern.varbType[ref.alias] = GTypeFloat
+			case GTypeBool:
+				gPattern.varbType[ref.alias] = GTypeBool
+			}
 		}
-		pattern = strings.ReplaceAll(pattern, values[0], buffer.String())
+
+		builder.WriteString(input[last:start])
+		if ref.alias != "" {
+			builder.WriteString("(?P<")
+			builder.WriteString(ref.alias)
+			builder.WriteString(">")
+			builder.WriteString(gP.denormalized)
+			builder.WriteString(")")
+		} else {
+			builder.WriteString("(")
+			builder.WriteString(gP.denormalized)
+			builder.WriteString(")")
+		}
+		last = end
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
-	gPattern.denormalized = pattern
+	if last == 0 {
+		gPattern.denormalized = input
+		return gPattern, nil
+	}
+
+	builder.WriteString(input[last:])
+	gPattern.denormalized = builder.String()
 	return gPattern, nil
 }
 
@@ -142,67 +285,83 @@ func CompilePattern(input string, denomalized PatternStorageIface) (*GrokRegexp,
 	if err != nil {
 		return nil, err
 	}
-	re, err := regexp.Compile(gP.denormalized)
-	if err != nil {
-		return nil, err
-	}
-
-	var subMatchNames SubMatchName
-	for i, name := range re.SubexpNames() {
-		if name != "" {
-			// update index
-			for j := range subMatchNames.name {
-				if subMatchNames.name[j] == name {
-					subMatchNames.subexpIndex[j] = i
-					break
-				}
-			}
-
-			// insert name and index
-			subMatchNames.name = append(subMatchNames.name, name)
-			subMatchNames.subexpIndex = append(subMatchNames.subexpIndex, i)
-		}
-	}
-
-	subMatchNames.subexpCount = len(re.SubexpNames())
-
-	return &GrokRegexp{
-		grokPattern:   gP,
-		re:            re,
-		subMatchNames: subMatchNames,
-	}, nil
+	return compileDenormalizedPattern(gP, denomalized)
 }
 
 func CompilePattern2(gP *GrokPattern, denomalized PatternStorageIface) (*GrokRegexp, error) {
-	re, err := regexp.Compile(gP.denormalized)
+	return compileDenormalizedPattern(gP, nil)
+}
+
+func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*GrokRegexp, error) {
+	meta, err := loadCompiledRegexpMeta(gP.denormalized)
 	if err != nil {
 		return nil, err
 	}
 
-	var subMatchNames SubMatchName
-	for i, name := range re.SubexpNames() {
-		if name != "" {
-			// update index
-			for j := range subMatchNames.name {
-				if subMatchNames.name[j] == name {
-					subMatchNames.subexpIndex[j] = i
-					break
-				}
-			}
-
-			// insert name and index
-			subMatchNames.name = append(subMatchNames.name, name)
-			subMatchNames.subexpIndex = append(subMatchNames.subexpIndex, i)
+	valueKinds := make([]valueKind, len(meta.subMatchNames.name))
+	for i, name := range meta.subMatchNames.name {
+		switch gP.varbType[name] {
+		case GTypeInt:
+			valueKinds[i] = valueKindInt
+		case GTypeFloat:
+			valueKinds[i] = valueKindFloat
+		case GTypeBool:
+			valueKinds[i] = valueKindBool
+		default:
+			valueKinds[i] = valueKindRaw
 		}
 	}
 
-	subMatchNames.subexpCount = len(re.SubexpNames())
-
 	return &GrokRegexp{
 		grokPattern:   gP,
+		re:            meta.re,
+		subMatchNames: meta.subMatchNames,
+		nameIndex:     meta.nameIndex,
+		valueKinds:    valueKinds,
+		fastMatcher:   buildFastMatcher(gP, storage, meta),
+	}, nil
+}
+
+func loadCompiledRegexpMeta(denormalized string) (*compiledRegexpMeta, error) {
+	if meta, ok := compiledRegexpCache.Load(denormalized); ok {
+		return meta.(*compiledRegexpMeta), nil
+	}
+
+	re, err := regexp.Compile(denormalized)
+	if err != nil {
+		return nil, err
+	}
+
+	subexpNames := re.SubexpNames()
+	subMatchNames := SubMatchName{
+		name:        make([]string, 0, len(subexpNames)),
+		subexpIndex: make([]int, 0, len(subexpNames)),
+		subexpCount: len(subexpNames),
+	}
+	nameIndex := make(map[string]int, len(subexpNames))
+
+	for i, name := range subexpNames {
+		if name == "" {
+			continue
+		}
+
+		if j, ok := nameIndex[name]; ok {
+			subMatchNames.subexpIndex[j] = i
+		} else {
+			nameIndex[name] = len(subMatchNames.name)
+		}
+
+		subMatchNames.name = append(subMatchNames.name, name)
+		subMatchNames.subexpIndex = append(subMatchNames.subexpIndex, i)
+	}
+
+	meta := &compiledRegexpMeta{
 		re:            re,
 		subMatchNames: subMatchNames,
-	}, nil
+		nameIndex:     nameIndex,
+	}
+	actual, _ := compiledRegexpCache.LoadOrStore(denormalized, meta)
+	return actual.(*compiledRegexpMeta), nil
 }
 
 func LoadPatternsFromPath(path string) (map[string]string, error) {
@@ -247,38 +406,72 @@ func LoadPatternsFromPath(path string) (map[string]string, error) {
 // DenormalizePatternsFromMap denormalize pattern from map,
 // will return a valid pattern:value map and an invalid pattern:error map.
 func DenormalizePatternsFromMap(m map[string]string, denormalized ...map[string]*GrokPattern) (map[string]*GrokPattern, map[string]string) {
-	patternDeps := map[string]*nodeP{}
+	resolved := make(map[string]*GrokPattern, len(m))
+	invalid := make(map[string]string)
+	visiting := make(map[string]bool, len(m))
+	stack := make([]string, 0, 8)
+	storage := make(PatternStorage, 0, len(denormalized)+1)
+	storage = append(storage, resolved)
+	storage = append(storage, denormalized...)
 
-	for key, value := range m {
-		node := &nodeP{
-			cnt:   value,
-			cNode: []string{},
+	var resolve func(string) error
+	resolve = func(name string) error {
+		if _, ok := resolved[name]; ok {
+			return nil
 		}
-
-		// sub pattern
-		for _, key := range normal.FindAllStringSubmatch(value, -1) {
-			names := strings.Split(key[1], ":")
-			syntax := names[0]
-
-			if _, ok := m[syntax]; ok {
-			} else { // 取 denormalized 的
-				for _, v := range denormalized {
-					if deV, ok := v[syntax]; ok {
-						node.cNode = append(node.cNode, syntax)
-						patternDeps[syntax] = &nodeP{
-							cnt: syntax,
-							ptn: deV,
-						}
-						break
-					}
+		if visiting[name] {
+			start := 0
+			for i := range stack {
+				if stack[i] == name {
+					start = i
+					break
 				}
 			}
-			node.cNode = append(node.cNode, syntax)
+			line := strings.Join(append(append([]string{}, stack[start:]...), name), " -> ")
+			return fmt.Errorf("circular dependency: pattern %s", line)
 		}
-		patternDeps[key] = node
+
+		value, ok := m[name]
+		if !ok {
+			return fmt.Errorf("no pattern found for %%{%s}", name)
+		}
+
+		visiting[name] = true
+		stack = append(stack, name)
+		defer func() {
+			stack = stack[:len(stack)-1]
+			delete(visiting, name)
+		}()
+
+		if err := walkPatternRefs(value, func(_, _ int, ref patternRef) error {
+			if _, ok := m[ref.syntax]; ok {
+				return resolve(ref.syntax)
+			}
+			for _, de := range denormalized {
+				if _, ok := de[ref.syntax]; ok {
+					return nil
+				}
+			}
+			return fmt.Errorf("no pattern found for %%{%s}", ref.syntax)
+		}); err != nil {
+			return err
+		}
+
+		gP, err := DenormalizePattern(value, storage)
+		if err != nil {
+			return err
+		}
+		resolved[name] = gP
+		return nil
 	}
 
-	return runTree(patternDeps)
+	for name := range m {
+		if err := resolve(name); err != nil {
+			invalid[name] = err.Error()
+		}
+	}
+
+	return resolved, invalid
 }
 
 func CopyDefalutPatterns() map[string]string {
