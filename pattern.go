@@ -260,7 +260,7 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 			builder.WriteString(gP.denormalized)
 			builder.WriteString(")")
 		} else {
-			builder.WriteString("(")
+			builder.WriteString("(?:")
 			builder.WriteString(gP.denormalized)
 			builder.WriteString(")")
 		}

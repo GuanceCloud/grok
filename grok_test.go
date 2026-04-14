@@ -1601,3 +1601,181 @@ func BenchmarkRunStructuredLogLevelUTFRegexpPath(b *testing.B) {
 		}
 	}
 }
+
+func benchmarkBuildCaptureMapNoPrealloc(g *GrokRegexp, content string, trimSpace bool) (map[string]string, error) {
+	match, err := g.matchIndexes(content)
+	if err != nil {
+		return nil, err
+	}
+
+	return benchmarkAssembleCaptureMapNoPrealloc(g, content, match, trimSpace), nil
+}
+
+func benchmarkAssembleCaptureMapNoPrealloc(g *GrokRegexp, content string, match []int, trimSpace bool) map[string]string {
+	captures := make(map[string]string)
+	for i, name := range g.subMatchNames.name {
+		captures[name] = extractMatch(content, match, g.subMatchNames.subexpIndex[i], trimSpace)
+	}
+	return captures
+}
+
+func benchmarkBuildCaptureMapNumSubexp(g *GrokRegexp, content string, trimSpace bool) (map[string]string, error) {
+	match, err := g.matchIndexes(content)
+	if err != nil {
+		return nil, err
+	}
+
+	return benchmarkAssembleCaptureMapNumSubexp(g, content, match, trimSpace), nil
+}
+
+func benchmarkAssembleCaptureMapNumSubexp(g *GrokRegexp, content string, match []int, trimSpace bool) map[string]string {
+	captures := make(map[string]string, g.re.NumSubexp())
+	for i, name := range g.subMatchNames.name {
+		captures[name] = extractMatch(content, match, g.subMatchNames.subexpIndex[i], trimSpace)
+	}
+	return captures
+}
+
+func benchmarkBuildCaptureMapNamedFields(g *GrokRegexp, content string, trimSpace bool) (map[string]string, error) {
+	match, err := g.matchIndexes(content)
+	if err != nil {
+		return nil, err
+	}
+
+	return benchmarkAssembleCaptureMapNamedFields(g, content, match, trimSpace), nil
+}
+
+func benchmarkAssembleCaptureMapNamedFields(g *GrokRegexp, content string, match []int, trimSpace bool) map[string]string {
+	captures := make(map[string]string, len(g.nameIndex))
+	for i, name := range g.subMatchNames.name {
+		captures[name] = extractMatch(content, match, g.subMatchNames.subexpIndex[i], trimSpace)
+	}
+	return captures
+}
+
+func BenchmarkBuildCaptureMapCapacityStrategy(b *testing.B) {
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+	}{
+		{
+			name:    "COMMONAPACHELOG",
+			pattern: `%{COMMONAPACHELOG}`,
+			line:    `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`,
+		},
+		{
+			name:    "ElasticSearchDefault",
+			pattern: `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[%{NOTSPACE:name}%{SPACE}\]%{SPACE}(\[%{HOSTNAME:nodeId}\])?.*`,
+			line:    `[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [master] high disk watermark [90%] exceeded on [A2kEFgMLQ1-vhMdZMJV3Iw][master][/tmp/elasticsearch-cluster/nodes/0] free: 17.1gb[7.3%], shards will be relocated away from this node; currently relocating away shards totalling [0] bytes; the node is expected to continue to exceed the high disk watermark when these relocations are complete`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		g, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			b.Fatalf("%s: %v", tc.name, err)
+		}
+
+		b.Run(tc.name+"/no_prealloc", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := benchmarkBuildCaptureMapNoPrealloc(g, tc.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(tc.name+"/num_subexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := benchmarkBuildCaptureMapNumSubexp(g, tc.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(tc.name+"/named_fields", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := benchmarkBuildCaptureMapNamedFields(g, tc.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAssembleCaptureMapCapacityStrategy(b *testing.B) {
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+	}{
+		{
+			name:    "COMMONAPACHELOG",
+			pattern: `%{COMMONAPACHELOG}`,
+			line:    `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`,
+		},
+		{
+			name:    "ElasticSearchDefault",
+			pattern: `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[%{NOTSPACE:name}%{SPACE}\]%{SPACE}(\[%{HOSTNAME:nodeId}\])?.*`,
+			line:    `[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [master] high disk watermark [90%] exceeded on [A2kEFgMLQ1-vhMdZMJV3Iw][master][/tmp/elasticsearch-cluster/nodes/0] free: 17.1gb[7.3%], shards will be relocated away from this node; currently relocating away shards totalling [0] bytes; the node is expected to continue to exceed the high disk watermark when these relocations are complete`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		g, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			b.Fatalf("%s: %v", tc.name, err)
+		}
+		match, err := g.matchIndexes(tc.line)
+		if err != nil {
+			b.Fatalf("%s: %v", tc.name, err)
+		}
+
+		b.Run(tc.name+"/no_prealloc", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret := benchmarkAssembleCaptureMapNoPrealloc(g, tc.line, match, true)
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(tc.name+"/num_subexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret := benchmarkAssembleCaptureMapNumSubexp(g, tc.line, match, true)
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(tc.name+"/named_fields", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret := benchmarkAssembleCaptureMapNamedFields(g, tc.line, match, true)
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
+}
