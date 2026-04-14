@@ -22,6 +22,25 @@ func TestDenormalizeGlobalPatterns(t *testing.T) {
 	}
 }
 
+func TestNormalizeTopLevelCapture(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: `(DEBUG|INFO|WARN|ERROR|FATAL)`, want: `(?:DEBUG|INFO|WARN|ERROR|FATAL)`},
+		{in: `([.0-9a-z]*)`, want: `(?:[.0-9a-z]*)`},
+		{in: `(?:LOG|ERROR)`, want: `(?:LOG|ERROR)`},
+		{in: `((foo))\1`, want: `((foo))\1`},
+		{in: `(foo)(bar)`, want: `(foo)(bar)`},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeTopLevelCapture(tc.in); got != tc.want {
+			t.Fatalf("normalizeTopLevelCapture(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func BenchmarkFindStringSubmatch(b *testing.B) {
 	re := regexp.MustCompile(`(\w+):(\w+):(\w+):(\w+):(\w+):(\w+)`)
 

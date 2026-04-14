@@ -176,6 +176,45 @@ func parsePatternRef(spec string) (patternRef, bool, error) {
 	}
 }
 
+func normalizeTopLevelCapture(raw string) string {
+	if len(raw) < 2 || raw[0] != '(' || raw[len(raw)-1] != ')' {
+		return raw
+	}
+	if len(raw) > 1 && raw[1] == '?' {
+		return raw
+	}
+
+	depth := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' {
+			if i+1 < len(raw) {
+				if raw[i+1] >= '1' && raw[i+1] <= '9' {
+					return raw
+				}
+				i++
+			}
+			continue
+		}
+		switch raw[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(raw)-1 {
+				return raw
+			}
+			if depth < 0 {
+				return raw
+			}
+		}
+	}
+
+	if depth != 0 {
+		return raw
+	}
+	return "(?:" + raw[1:len(raw)-1] + ")"
+}
+
 func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error) error {
 	for i := 0; i < len(input); {
 		start := strings.Index(input[i:], "%{")
@@ -215,6 +254,7 @@ func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error
 func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 	*GrokPattern, error,
 ) {
+	input = normalizeTopLevelCapture(input)
 	gPattern := &GrokPattern{
 		varbType: make(map[string]string),
 		pattern:  input,
