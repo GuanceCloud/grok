@@ -27,6 +27,7 @@ type GrokRegexp struct {
 	nameIndex     map[string]int
 	valueKinds    []valueKind
 	fastMatcher   *structuredMatcher
+	prefilter     *regexpPrefilter
 }
 
 type valueKind uint8
@@ -167,6 +168,9 @@ func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any
 func (g *GrokRegexp) matchIndexes(content string) ([]int, error) {
 	if g.re == nil {
 		return nil, ErrNotCompiled
+	}
+	if g.prefilter != nil && g.prefilter.rejects(content) {
+		return nil, ErrMismatch
 	}
 
 	match := g.re.FindStringSubmatchIndex(content)

@@ -61,21 +61,86 @@ func isApacheNumber(s string) bool {
 			return false
 		}
 	}
+	if s[i] == '.' {
+		i++
+		if i == len(s) {
+			return false
+		}
+		for ; i < len(s); i++ {
+			if s[i] < '0' || s[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
 
 	digits := 0
-	dotSeen := false
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		digits++
+		i++
+	}
+	if digits == 0 {
+		return false
+	}
+	if i == len(s) {
+		return true
+	}
+	if s[i] != '.' {
+		return false
+	}
+	i++
+	if i == len(s) || s[i] < '0' || s[i] > '9' {
+		return false
+	}
 	for ; i < len(s); i++ {
-		switch {
-		case s[i] >= '0' && s[i] <= '9':
-			digits++
-		case s[i] == '.' && !dotSeen:
-			dotSeen = true
-		default:
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
+	return true
+}
 
-	return digits > 0
+func isApacheInt(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	i := 0
+	if s[0] == '+' || s[0] == '-' {
+		i++
+	}
+	if i == len(s) {
+		return false
+	}
+	for ; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isApachePosInt(s string) bool {
+	if len(s) == 0 || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isApacheNonNegInt(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func maybeTrim(s string, trim bool) string {
@@ -209,6 +274,9 @@ func consumePatternTimeOfDay(s string, start int, allowLeadingNonDigit bool, all
 		return 0, false
 	}
 	i = next
+	if i < len(s) && isASCIIDigit(s[i]) {
+		return 0, false
+	}
 	if allowTrailingNonDigit && i < len(s) && !isASCIIDigit(s[i]) {
 		i++
 	}
@@ -284,7 +352,7 @@ func consumeTwoDigitRange(s string, i *int, min int, max int, allowSingle bool) 
 
 func consumeSecondValue(s string, i *int) bool {
 	start := *i
-	if !consumeOneOrTwoDigits(s, i) {
+	if !consumeNDigits(s, i, 2) {
 		return false
 	}
 	v, ok := parsePositiveInt(s[start:*i])

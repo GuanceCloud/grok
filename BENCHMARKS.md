@@ -1,121 +1,171 @@
 # Benchmark Comparison Against Regexp
 
-These numbers compare the current structured fast path with the same patterns forced down the pure `regexp` path. Semantic parity is checked by `TestDatakitFixturesMatchRegexp`.
+See [PERFORMANCE_NOTES.md](./PERFORMANCE_NOTES.md) for the current high-level conclusions, next-stage plan, and external references behind the optimization direction.
+
+These numbers compare the current structured fast path with the same patterns forced down the `regexp` path.
+
+Note: the `regexp` path in these benchmarks is the current shipped fallback path, so it still includes the lightweight `regexp` prefilter added in this round. For fuzz parity we additionally compare against raw `regexp` with the prefilter disabled.
 
 ## Environment
 
 - Date: `2026-04-22`
 - OS/Arch: `linux/amd64`
 - CPU: `AMD Ryzen 7 9700X 8-Core Processor`
-- Command:
+- Verification:
+  - `go test ./...`
   - `go test -run '^(TestDatakitFixturesMatchRegexp|TestDatakitFixturesMutationParity|TestCommonComposedPatternsMatchRegexp|TestCommonComposedPatternsMutationParity|TestTypedPatternsMutationParity|TestRunWithTypeInfoStructuredFastPathMatchesRegexp)$' -count=1 ./...`
+- Benchmarks:
   - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
   - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
-  - `go test -run '^$' -bench '^(BenchmarkRunWithTypeInfo(|To|WithPoolParallel|WithPoolHelperParallel|StructuredCommon(|RegexpPath)))$' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^(BenchmarkRunWithTypeInfo(|RegexpPath|To|WithPoolParallel|WithPoolHelperParallel|StructuredCommon(|RegexpPath)|PipelineAccess(|RegexpPath)))$' -benchmem -benchtime=300ms`
   - `go test -run '^$' -bench '^BenchmarkCommonComposedPatterns/(go_|java_|python_|node_|zap_|logrus_|k8s_)' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^BenchmarkRunRegexpPrefilterLiteralSetMismatch$' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^(BenchmarkRunCommonApacheLog(|RegexpPath|To|ToParallel|Parallel|WithPoolParallel|WithPoolHelperParallel)|BenchmarkRunStructured(Composite(|RegexpPath)|SQLServer(|RegexpPath)|NginxAccess(|RegexpPath)|LogLevel(|RegexpPath))|BenchmarkBuildCaptureMapCapacityStrategy|BenchmarkAssembleCaptureMapCapacityStrategy|BenchmarkFindStringSubmatch|BenchmarkFromMap|BenchmarkCompilePatternCommonApacheLog(|Parallel))$' -benchmem -benchtime=300ms`
 
 ## Summary
 
-- Scope: `24` real grok-backed fixture cases from `testdata/datakit_pipeline_cases.json`
-- Result: `21/24` cases show clear gains over `regexp`; only `Apache error`, `Consul`, and `MySQL slow log` remain slightly slower in this run
-- Biggest wins: Elasticsearch, Jenkins, RabbitMQ, Apache access, Nginx access, PostgreSQL, SQLServer
-- Generic improvements in this round:
-  - structured matchers now carry lightweight IR metadata (`minWidth`, nullability, stable boundary literals) that is used both at compile time and at match time
-  - parser context slicing now distinguishes a safe boundary literal from an exact suffix literal, so user-composed patterns like `NOTSPACE + SPACE + literal` keep their fast path without overfitting to specific fixtures
-  - `Run` now uses the IR to reject obvious mismatches before allocating result buffers, which makes short failures zero-allocation and faster than the regexp path
+- Scope: `24` real grok-backed Datakit fixture cases from `testdata/datakit_pipeline_cases.json`
+- Result: `23/24` fixture cases are faster than the current `regexp` fallback path
+- Remaining slower case: `ElasticSearch_log`
+- Biggest wins in this run: `ElasticSearch_search_slow_log`, `Consul`, `ElasticSearch_index_slow_log`, `TDengine 204`, `TDengine 200`, `Python gunicorn access`
+- This round also added a `regexp` prefilter plus additional structured-path correctness fixes found by fuzzing
+
+## Fuzz Campaign
+
+The following fuzz targets were added and run for `15s` each:
+
+- `FuzzStructuredApacheErrorParity`: passed after about `114,857` execs
+- `FuzzStructuredConsulFixtureParity`: initially found `3` real structured overmatch bugs, then passed after about `669,205` execs
+- `FuzzStructuredMySQLSlowFixtureParity`: initially found `1` real structured overmatch bug, then passed after about `1,038,533` execs
+- `FuzzRegexpPrefilterLiteralSetParity`: passed after about `3,916,430` execs
+
+Concrete bugs found and fixed by fuzzing:
+
+- case-insensitive `(?i)` literal regexes must not build a case-sensitive prefilter
+- `POSINT`, `NONNEGINT`, `INT`, and `NUMBER` cannot share one widened numeric matcher
+- `SECOND` and `TIME` must require two-digit seconds to match upstream grok semantics
+- `HOSTNAME` and the hostname branch of `IPORHOST` need `\b`-style boundary checks
+- `NUMBER` / `BASE10NUM` must reject trailing bare decimal points such as `0.`
 
 ## Datakit Fixtures
 
 | Fixture | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Apache access | 232.8 | 1742.0 | 7.5x | 288/208 | 2/2 |
-| Apache error | 3850.0 | 3791.0 | 1.0x | 144/144 | 2/2 |
-| Consul | 9597.0 | 9280.0 | 1.0x | 147/144 | 2/2 |
-| Dameng | 173.1 | 749.4 | 4.3x | 48/112 | 1/2 |
-| Elasticsearch log | 293.0 | 8573.0 | 29.3x | 256/147 | 2/2 |
-| Elasticsearch index slow log | 398.1 | 6248.0 | 15.7x | 272/176 | 2/2 |
-| Elasticsearch search slow log | 484.0 | 13558.0 | 28.0x | 272/176 | 2/2 |
-| Jenkins | 152.4 | 1696.0 | 11.1x | 240/112 | 2/2 |
-| Kafka | 199.0 | 1526.0 | 7.7x | 64/144 | 1/2 |
-| Kingbase | 208.2 | 613.5 | 2.9x | 64/144 | 1/2 |
-| MySQL | 109.4 | 864.0 | 7.9x | 64/144 | 1/2 |
-| MySQL slow log | 2018.0 | 2009.0 | 1.0x | 499/498 | 2/2 |
-| Nginx access | 376.7 | 2401.0 | 6.4x | 560/304 | 3/2 |
-| Nginx error log 1 | 499.9 | 3077.0 | 6.2x | 592/337 | 3/2 |
-| Nginx error log 2 | 178.5 | 640.1 | 3.6x | 48/112 | 1/2 |
-| PostgreSQL | 724.8 | 5593.0 | 7.7x | 320/273 | 2/2 |
-| RabbitMQ | 79.50 | 1214.0 | 15.3x | 48/112 | 1/2 |
-| Redis | 188.9 | 555.1 | 2.9x | 80/176 | 1/2 |
-| Solr | 189.6 | 806.4 | 4.3x | 64/144 | 1/2 |
-| SQLServer | 97.31 | 783.8 | 8.1x | 48/112 | 1/2 |
-| TDengine 200 | 3070.0 | 3086.0 | 1.0x | 144/144 | 2/2 |
-| TDengine 204 | 4045.0 | 4171.0 | 1.0x | 145/144 | 2/2 |
-| Tomcat access | 344.9 | 1038.0 | 3.0x | 560/304 | 3/2 |
-| Tomcat catalina | 241.0 | 931.1 | 3.9x | 80/176 | 1/2 |
+| Apache access | 313.7 | 1713.0 | 5.5x | 288/208 | 2/2 |
+| Apache error | 563.9 | 3374.0 | 6.0x | 256/144 | 2/2 |
+| Consul | 433.4 | 9014.0 | 20.8x | 272/147 | 3/2 |
+| Dameng | 230.0 | 726.1 | 3.2x | 240/112 | 2/2 |
+| Elasticsearch index slow log | 490.0 | 6037.0 | 12.3x | 272/178 | 2/2 |
+| Elasticsearch log | 10793.0 | 7800.0 | 0.7x | 406/147 | 4/2 |
+| Elasticsearch search slow log | 669.6 | 13847.0 | 20.7x | 272/180 | 2/2 |
+| Jenkins | 216.9 | 1699.0 | 7.8x | 240/112 | 2/2 |
+| Kafka | 194.2 | 1525.0 | 7.9x | 64/144 | 1/2 |
+| Kingbase | 262.8 | 597.8 | 2.3x | 256/144 | 2/2 |
+| MySQL | 172.6 | 892.8 | 5.2x | 64/144 | 1/2 |
+| MySQL slow log | 1194.0 | 1989.0 | 1.7x | 816/498 | 3/2 |
+| Nginx access | 448.9 | 2365.0 | 5.3x | 560/304 | 3/2 |
+| Nginx error log 1 | 559.8 | 2820.0 | 5.0x | 592/338 | 3/2 |
+| Nginx error log 2 | 221.3 | 639.8 | 2.9x | 48/112 | 1/2 |
+| PostgreSQL | 900.5 | 5594.0 | 6.2x | 320/273 | 2/2 |
+| RabbitMQ | 146.6 | 1231.0 | 8.4x | 48/112 | 1/2 |
+| Redis | 197.5 | 539.3 | 2.7x | 80/176 | 1/2 |
+| Solr | 233.1 | 996.9 | 4.3x | 64/145 | 1/2 |
+| SQLServer | 164.3 | 785.9 | 4.8x | 48/112 | 1/2 |
+| TDengine 200 | 227.3 | 2850.0 | 12.5x | 256/144 | 2/2 |
+| TDengine 204 | 248.9 | 3671.0 | 14.7x | 256/144 | 2/2 |
+| Tomcat access | 414.1 | 1001.0 | 2.4x | 560/305 | 3/2 |
+| Tomcat catalina | 254.9 | 912.7 | 3.6x | 80/176 | 1/2 |
 
-## UTF Micro Benchmark
+`ElasticSearch_log` remains the only slower Datakit fixture. A targeted rerun put it around `8.4us/op` fast vs `8.0us/op` regexp, so it is still near parity but on the wrong side.
 
-This verifies that the fast path still behaves well with UTF content and Unicode trimming.
-
-| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Structured LOGLEVEL with UTF message | 89.11 | 452.1 | 5.1x | 48/112 | 1/2 |
-
-## Common Pattern Micro Benchmarks
-
-These are small focused checks for common upstream grok layouts outside the Datakit fixture set.
+## Structured Micro Benchmarks
 
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Structured SYSLOG line | 171.4 | 4693.0 | 27.4x | 48/113 | 1/2 |
-| Structured short mismatch | 2.688 | 4.682 | 1.7x | 0/0 | 0/0 |
+| Structured LOGLEVEL UTF | 170.8 | 471.3 | 2.8x | 48/112 | 1/2 |
+| Structured SYSLOG line | 200.5 | 7973.0 | 39.8x | 64/112 | 2/2 |
+| Structured composite | 191.5 | 794.7 | 4.2x | 128/273 | 1/2 |
+| Structured SQLServer | 167.7 | 500.2 | 3.0x | 48/112 | 1/2 |
+| Structured Nginx access | 426.2 | 965.5 | 2.3x | 560/305 | 3/2 |
+| Structured LOGLEVEL | 165.4 | 459.2 | 2.8x | 48/112 | 1/2 |
+
+Short mismatch is now a useful reminder that the new regexp prefilter helps the fallback path too:
+
+| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Structured short mismatch | 33.42 | 4.696 | 0.1x | 48/0 | 1/0 |
 
 ## Typed Extraction Benchmarks
 
-These matter directly for `pipeline-go`, which calls `RunWithTypeInfo` whenever the grok pattern declares field types.
-
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| RunWithTypeInfo simple typed line | 89.15 | 199.8 | 2.2x | 56/120 | 2/3 |
-| RunWithTypeInfo structured typed line | 312.7 | 662.0 | 2.1x | 384/257 | 6/6 |
-| RunWithTypeInfo pipeline-go style access line | 413.9 | 24181.0 | 58.4x | 504/431 | 10/10 |
-| RunWithTypeInfoTo simple typed line | 75.82 | n/a | n/a | 8/n/a | 1/n/a |
-| RunWithTypeInfo pooled parallel | 15.52 | n/a | n/a | 8/n/a | 1/n/a |
+| RunWithTypeInfo simple typed line | 104.2 | 198.1 | 1.9x | 56/121 | 2/3 |
+| RunWithTypeInfo structured typed line | 394.5 | 680.3 | 1.7x | 384/257 | 6/6 |
+| RunWithTypeInfo pipeline-go style access line | 552.1 | 24577.0 | 44.5x | 568/431 | 11/10 |
+| RunWithTypeInfoTo | 89.35 | n/a | n/a | 8/n/a | 1/n/a |
+| RunWithTypeInfo pooled parallel | 17.96 | n/a | n/a | 8/n/a | 1/n/a |
+| RunWithTypeInfo pooled helper parallel | 17.92 | n/a | n/a | 8/n/a | 1/n/a |
 
 ## Common Application Composed Patterns
 
-These are custom, user-style composed patterns meant to reflect common application log formats rather than Datakit defaults.
+| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go logfmt service line | 312.0 | 1360.0 | 4.4x | 272/176 | 2/2 |
+| Go Gin access line | 266.1 | 2315.0 | 8.7x | 160/208 | 2/2 |
+| Go worker line with optional trace | 228.7 | 621.8 | 2.7x | 80/176 | 1/2 |
+| Java logback line | 209.7 | 869.9 | 4.1x | 80/176 | 1/2 |
+| Java Spring Boot line | 240.6 | 889.5 | 3.7x | 96/208 | 1/2 |
+| Python uvicorn line | 162.2 | 575.1 | 3.5x | 64/144 | 1/2 |
+| Python gunicorn access line | 447.6 | 24108.0 | 53.9x | 624/311 | 4/2 |
+| Node pino line | 258.0 | 504.7 | 2.0x | 272/176 | 2/2 |
+| Zap console line | 183.8 | 629.1 | 3.4x | 64/144 | 1/2 |
+| Logrus text line | 260.1 | 778.6 | 3.0x | 256/144 | 2/2 |
+| Kubernetes controller-runtime line | 508.6 | 1759.0 | 3.5x | 320/273 | 2/2 |
+
+## Regexp Prefilter Benchmark
 
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Go logfmt service line | 240.9 | 1351.0 | 5.6x | 272/176 | 2/2 |
-| Go Gin access line | 196.6 | 2600.0 | 13.2x | 96/209 | 1/2 |
-| Go worker line with optional trace | 166.1 | 616.9 | 3.7x | 80/176 | 1/2 |
-| Java logback line | 144.9 | 888.0 | 6.1x | 80/176 | 1/2 |
-| Java Spring Boot line | 187.6 | 889.3 | 4.7x | 96/208 | 1/2 |
-| Python uvicorn line | 108.3 | 574.9 | 5.3x | 64/144 | 1/2 |
-| Python gunicorn access line | 350.1 | 24192.0 | 69.1x | 560/317 | 3/2 |
-| Node pino line | 221.8 | 501.0 | 2.3x | 272/176 | 2/2 |
-| Zap console line | 120.0 | 636.3 | 5.3x | 64/144 | 1/2 |
-| Logrus text line | 202.7 | 789.3 | 3.9x | 256/144 | 2/2 |
-| Kubernetes controller-runtime line | 401.4 | 1759.0 | 4.4x | 320/273 | 2/2 |
+| Literal set mismatch with prefilter | 8.732 | 25.73 | 2.9x | 0/0 | 0/0 |
+
+## Capture Map Benchmarks
+
+| Benchmark | Variant | ns/op | B/op | Allocs/op |
+| --- | --- | ---: | ---: | ---: |
+| BuildCaptureMap COMMONAPACHELOG | no_prealloc | 30498 | 1139 | 6 |
+| BuildCaptureMap COMMONAPACHELOG | num_subexp | 22154 | 847 | 5 |
+| BuildCaptureMap COMMONAPACHELOG | named_fields | 22391 | 840 | 5 |
+| BuildCaptureMap ElasticSearchDefault | no_prealloc | 12242 | 418 | 3 |
+| BuildCaptureMap ElasticSearchDefault | num_subexp | 12621 | 425 | 3 |
+| BuildCaptureMap ElasticSearchDefault | named_fields | 12319 | 419 | 3 |
+| AssembleCaptureMap COMMONAPACHELOG | no_prealloc | 294.1 | 952 | 5 |
+| AssembleCaptureMap COMMONAPACHELOG | num_subexp | 188.1 | 664 | 4 |
+| AssembleCaptureMap COMMONAPACHELOG | named_fields | 197.4 | 664 | 4 |
+| AssembleCaptureMap ElasticSearchDefault | no_prealloc | 82.13 | 336 | 2 |
+| AssembleCaptureMap ElasticSearchDefault | num_subexp | 83.69 | 336 | 2 |
+| AssembleCaptureMap ElasticSearchDefault | named_fields | 85.82 | 336 | 2 |
+
+## Additional Benchmarks
+
+| Benchmark | Result |
+| --- | --- |
+| `FindStringSubmatch` | `311.3ns/op`, `224 B/op`, `2 allocs/op` |
+| `FindStringSubmatchIndex` | `286.4ns/op`, `112 B/op`, `1 allocs/op` |
+| `FromMap` | `359859ns/op`, `590395 B/op`, `3665 allocs/op` |
+| `CompilePatternCommonApacheLog` | `8954ns/op`, `54696 B/op`, `117 allocs/op` |
+| `CompilePatternCommonApacheLogParallel` | `9516ns/op`, `54700 B/op`, `117 allocs/op` |
+| `RunCommonApacheLog` | `542.4ns/op`, `656 B/op`, `4 allocs/op` |
+| `RunCommonApacheLogRegexpPath` | `21560ns/op`, `342 B/op`, `2 allocs/op` |
+| `RunCommonApacheLogParallel` | `164.4ns/op`, `656 B/op`, `4 allocs/op` |
+| `RunCommonApacheLogTo` | `530.3ns/op`, `496 B/op`, `3 allocs/op` |
+| `RunCommonApacheLogToParallel` | `139.3ns/op`, `496 B/op`, `3 allocs/op` |
+| `RunCommonApacheLogWithPoolParallel` | `147.7ns/op`, `496 B/op`, `3 allocs/op` |
+| `RunCommonApacheLogWithPoolHelperParallel` | `146.6ns/op`, `496 B/op`, `3 allocs/op` |
 
 ## Notes
 
-- Slightly slower cases today: `Apache error`, `Consul`, and `MySQL slow log`
-- Regex-only paths now avoid extra unnamed capture groups for plain `%{PATTERN}` expansion, which lowers `B/op` substantially on many real patterns even when the fast path is disabled
-- Regex-only paths now also normalize nested anonymous grouping such as `(foo)(bar)` or `(\[%{GREEDYDATA}\])` into non-capturing form when no numeric backreferences are present. This trims submatch bookkeeping for user-defined composed patterns without changing named captures.
-- User-defined patterns that wrap the whole expression in a redundant anonymous capture, such as `(LOG|ERROR|...)` or `([.0-9a-z]*)`, now get normalized to non-capturing form before denormalization; this trims regex work without changing exposed named fields
-- Structured literal parsing now understands repeated plain literals such as ` +` and ` *`, which lets common syslog-style upstream patterns reach the fast path without hard-coding product-specific matchers
-- Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
-- Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
-- `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
-- Besides the fixture-level parity tests, the suite now includes deterministic mutation parity coverage for Datakit patterns, common user-composed patterns, and typed `pipeline-go` style patterns. These cases came from fuzzing and are kept as stable CI-friendly regressions.
-- `RunWithTypeInfo` now uses a typed structured fast path when one exists, rather than first materializing raw strings and then casting them; this is directly relevant to `pipeline-go` because that project switches to typed extraction as soon as a grok field is declared with `:int`, `:float`, `:bool`, or `:string`
-- On a `pipeline-go` style typed access-log pattern, that typed fast path cuts runtime from about `24.2us` to `414ns` while also reaching allocation parity with regexp
-- The same generic machinery also carries over to common user-composed application logs; the current synthetic set spans Go, Java, Python, Node.js, Zap, Logrus, and controller-runtime without adding language-specific hard-coded matchers
-- That broader set currently ranges from about `2.3x` on `pino`-style logfmt to about `69x` on access-style Python logs, which matches the underlying rule of thumb: fixed delimiters and stable field order benefit the most
-- A new generic parser-chain relaxation now allows `DATA`/`GREEDYDATA` followed by `SPACE` and then a fixed literal to stay on the structured path; that is what moved `controller-runtime` style reconcile logs from parity to about `4.4x`
-- The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`
-- Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, and `Consul` is again slightly behind in this run; that remains a fallback-tuning target rather than a fast-path semantics issue
-- The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples
+- The Apache error, Consul, and MySQL slow-log regressions from the previous report are gone in this run.
+- The main unresolved outlier is still `ElasticSearch_log`.
+- The new regexp prefilter helps fallback mismatches materially, which is why some mismatch-only benchmarks now favor the regexp path.
+- Fuzzing was useful here: it found real semantic drift that the fixed fixture corpus did not catch.
+- The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of only synthetic samples.

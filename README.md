@@ -2,6 +2,11 @@
 
 This library is a fork of [github.com/vjeantet/grok](https://github.com/vjeantet/grok) that parses grok patterns in Go.
 
+## Project Notes
+
+- Performance results: [BENCHMARKS.md](./BENCHMARKS.md)
+- Performance conclusions and next-stage plan: [PERFORMANCE_NOTES.md](./PERFORMANCE_NOTES.md)
+
 ## Usage
 
 ### Denormalize and Compile

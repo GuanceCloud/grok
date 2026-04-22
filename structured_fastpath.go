@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"net"
 	"strings"
 	"unicode/utf8"
 )
@@ -57,6 +58,7 @@ type structuredParser struct {
 	kind          structuredKind
 	charClass     *asciiCharClass
 	allowEmpty    bool
+	dotAll        bool
 	nextLiteral   string
 	nextParser    structuredKind
 	hasNextParser bool
@@ -74,6 +76,9 @@ const (
 	structuredHostName
 	structuredIPOrHost
 	structuredNumber
+	structuredInt
+	structuredPosInt
+	structuredNonNegInt
 	structuredCharClass
 	structuredMonthName
 	structuredDayName
@@ -87,6 +92,7 @@ const (
 	structuredQuoted
 	structuredUntilLiteral
 	structuredGreedyUntilLiteral
+	structuredSpaceOne
 	structuredSpacePlus
 	structuredSpaceStar
 	structuredTimestampISO8601
@@ -378,7 +384,7 @@ func parserMinWidth(p *structuredParser) int {
 		return 0
 	}
 	switch p.kind {
-	case structuredWord, structuredNotSpace, structuredHostName, structuredNumber, structuredCharClass:
+	case structuredWord, structuredNotSpace, structuredHostName, structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt, structuredCharClass:
 		if p.allowEmpty {
 			return 0
 		}
@@ -397,7 +403,7 @@ func parserMinWidth(p *structuredParser) int {
 		return 2
 	case structuredUntilLiteral, structuredGreedyUntilLiteral, structuredSpaceStar:
 		return 0
-	case structuredSpacePlus:
+	case structuredSpaceOne, structuredSpacePlus:
 		return 1
 	case structuredTimestampISO8601:
 		return 13
@@ -531,7 +537,13 @@ func matcherNeedsChangeLog(steps []structuredStep) bool {
 }
 
 func parserNeedsBacktracking(step structuredStep) bool {
-	return step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != ""
+	return step.parser != nil && step.parser.nextLiteral != "" &&
+		(step.parser.kind == structuredGreedyUntilLiteral ||
+			(step.parser.kind == structuredNotSpace && !step.parser.hasNextParser && !literalStartsWithRegexpSpace(step.parser.nextLiteral)))
+}
+
+func literalStartsWithRegexpSpace(lit string) bool {
+	return lit != "" && isRegexpASCIISpace(lit[0])
 }
 
 func matcherChangeCapacity(steps []structuredStep) int {
@@ -599,22 +611,7 @@ func shouldUseStructuredMatcher(steps []structuredStep) bool {
 	}
 
 	stats := collectStructuredStats(steps)
-	if stats.newlineLiteralCount > 0 && (stats.optionalCount > 0 || stats.alternativeCount > 0 || stats.parserCount > 12) {
-		return false
-	}
-	// Some medium-complexity patterns still compile structurally but do not
-	// beat regexp in practice. The Datakit Apache error fixture is the
-	// representative case: two GREEDYDATA captures around a single expanded
-	// submatcher and no branches. Let those fall back, while keeping simpler
-	// two-greedy layouts such as Jenkins on the fast path.
-	if stats.greedyParserCount >= 2 && stats.optionalCount == 0 && stats.alternativeCount == 0 && stats.submatcherCount == 1 && stats.parserCount >= 8 {
-		return false
-	}
-	// Some flat syslog-style layouts now compile after adding literal `+/*`
-	// repetition support, but the current structured path still loses to
-	// regexp when the line is mostly nested subpatterns plus a single greedy
-	// tail. Keep the compiler support, but let these stay on regexp for now.
-	if stats.optionalCount == 0 && stats.greedyParserCount == 1 && stats.dataParserCount == 1 && stats.submatcherCount >= 4 && stats.alternativeCount >= 4 && stats.parserCount >= 18 {
+	if stats.newlineLiteralCount > 0 && stats.alternativeCount > 0 && stats.parserCount > 12 {
 		return false
 	}
 	return true
@@ -681,6 +678,9 @@ func compileStructuredSteps(pattern string, storage PatternStorageIface, meta *c
 	if depth > 16 {
 		return nil, false
 	}
+	if step, ok := compileDotAllTailPattern(pattern); ok {
+		return []structuredStep{step}, true
+	}
 
 	alts, pos, ok := parseStructuredExpression(pattern, 0, 0, storage, meta, depth)
 	if !ok || pos != len(pattern) {
@@ -693,6 +693,33 @@ func compileStructuredSteps(pattern string, storage PatternStorageIface, meta *c
 
 	steps := []structuredStep{{alternatives: buildAlternativeMatchers(alts), captureIndex: -1}}
 	return steps, validateStructuredSteps(steps)
+}
+
+func compileDotAllTailPattern(pattern string) (structuredStep, bool) {
+	switch pattern {
+	case `(?s)(.*)`, `(?s)(?:.*)`:
+		return structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredGreedyUntilLiteral,
+				allowEmpty: true,
+				dotAll:     true,
+			},
+		}, true
+	case `(?s)(.+)`, `(?s)(?:.+)`:
+		return structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredGreedyUntilLiteral,
+				allowEmpty: false,
+				dotAll:     true,
+			},
+		}, true
+	default:
+		return structuredStep{}, false
+	}
 }
 
 func parseStructuredExpression(pattern string, pos int, stop byte, storage PatternStorageIface, meta *compiledRegexpMeta, depth int) ([][]structuredStep, int, bool) {
@@ -785,11 +812,43 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 	if ref.alias != "" && dstIndex < 0 {
 		return nil, pos, false
 	}
+	if !optional {
+		if inlined, ok := inlineAliasedStructuredSteps(childSteps, dstIndex); ok {
+			return inlined, next, true
+		}
+	}
 	return []structuredStep{{
 		submatcher:   &structuredMatcher{steps: childSteps},
 		captureIndex: dstIndex,
 		optional:     optional,
 	}}, next, true
+}
+
+func inlineAliasedStructuredSteps(steps []structuredStep, dstIndex int) ([]structuredStep, bool) {
+	if dstIndex < 0 || len(steps) != 1 {
+		return nil, false
+	}
+
+	step := steps[0]
+	if step.optional || step.submatcher != nil || step.writes {
+		return nil, false
+	}
+
+	switch {
+	case step.parser != nil:
+		parser := *step.parser
+		parser.dstIndex = dstIndex
+		step.parser = &parser
+		return []structuredStep{step}, true
+	case len(step.alternatives) > 0:
+		step.captureIndex = dstIndex
+		return []structuredStep{step}, true
+	case step.literal != "":
+		step.captureIndex = dstIndex
+		return []structuredStep{step}, true
+	default:
+		return nil, false
+	}
 }
 
 func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, meta *compiledRegexpMeta, depth int) ([]structuredStep, int, bool) {
@@ -813,6 +872,11 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	if len(alts) == 1 && !optional {
 		return alts[0], next, true
 	}
+	if len(alts) == 1 && optional {
+		if flattened, ok := flattenOptionalStructuredGroup(alts[0]); ok {
+			return flattened, next, true
+		}
+	}
 
 	step := structuredStep{
 		optional:     optional,
@@ -824,6 +888,18 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 		step.alternatives = buildAlternativeMatchers(alts)
 	}
 	return []structuredStep{step}, next, true
+}
+
+func flattenOptionalStructuredGroup(steps []structuredStep) ([]structuredStep, bool) {
+	if len(steps) != 1 {
+		return nil, false
+	}
+	step := steps[0]
+	if step.optional {
+		return nil, false
+	}
+	step.optional = true
+	return []structuredStep{step}, true
 }
 
 func parseStructuredLiteral(pattern string, pos int) ([]structuredStep, int, bool) {
@@ -917,7 +993,7 @@ func canParserBridgeToFutureLiteral(steps []structuredStep, idx int) bool {
 			return false
 		}
 		switch step.parser.kind {
-		case structuredSpacePlus, structuredSpaceStar:
+		case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
 			continue
 		default:
 			return false
@@ -943,8 +1019,14 @@ func structuredPrimitiveKind(syntax string) (structuredKind, bool) {
 		return structuredURIPathParam, true
 	case "EMAILLOCALPART":
 		return structuredNotSpace, true
-	case "INT", "NUMBER", "BASE10NUM", "POSINT", "NONNEGINT":
+	case "INT":
+		return structuredInt, true
+	case "NUMBER", "BASE10NUM":
 		return structuredNumber, true
+	case "POSINT":
+		return structuredPosInt, true
+	case "NONNEGINT":
+		return structuredNonNegInt, true
 	case "MONTH":
 		return structuredMonthName, true
 	case "DAY":
@@ -1055,6 +1137,13 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 			switch raw[i] {
 			case 's':
 				flushLiteral()
+				if i+1 < len(raw) && raw[i+1] == '?' {
+					return nil, false
+				}
+				if i+1 >= len(raw) || (raw[i+1] != '+' && raw[i+1] != '*') {
+					steps = append(steps, structuredStep{captureIndex: -1, parser: &structuredParser{dstIndex: -1, kind: structuredSpaceOne}})
+					continue
+				}
 				if i+1 < len(raw) && raw[i+1] == '+' {
 					steps = append(steps, structuredStep{captureIndex: -1, parser: &structuredParser{dstIndex: -1, kind: structuredSpacePlus}})
 					i++
@@ -1230,7 +1319,7 @@ func nextStructuredSlicingLiteral(steps []structuredStep, start int) string {
 		}
 		if step.parser != nil {
 			switch step.parser.kind {
-			case structuredSpacePlus, structuredSpaceStar:
+			case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
 				continue
 			default:
 				return ""
@@ -1463,6 +1552,9 @@ func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int
 				}
 				return 0, false
 			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = maybeTrim(content[pos:pos+len(step.literal)], trimSpace)
+			}
 			pos += len(step.literal)
 			continue
 		case step.parser != nil:
@@ -1545,6 +1637,9 @@ func (m structuredMatcher) matchTypedLinearFrom(dst []any, content string, pos i
 					continue
 				}
 				return 0, false
+			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex])
 			}
 			pos += len(step.literal)
 			continue
@@ -1640,6 +1735,9 @@ func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trim
 				}
 				return 0, false, changes
 			}
+			if step.captureIndex >= 0 {
+				changes = appendMatchChange(dst, changes, step.captureIndex, maybeTrim(content[pos:pos+len(step.literal)], trimSpace))
+			}
 			pos += len(step.literal)
 			continue
 		case step.parser != nil:
@@ -1725,6 +1823,9 @@ func (m structuredMatcher) matchTypedFrom(dst []any, content string, pos int, tr
 					continue
 				}
 				return 0, false, changes
+			}
+			if step.captureIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex]))
 			}
 			pos += len(step.literal)
 			continue
@@ -1813,8 +1914,8 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 	}
 
 	step := steps[idx]
-	if step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != "" {
-		return matchStructuredGreedyParserStep(steps, idx, step, dst, content, pos, trimSpace, changes)
+	if step.parser != nil && parserNeedsBacktracking(step) {
+		return matchStructuredBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, changes)
 	}
 
 	mark := len(changes)
@@ -1846,8 +1947,8 @@ func matchTypedStructuredSteps(steps []structuredStep, idx int, dst []any, conte
 	}
 
 	step := steps[idx]
-	if step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != "" {
-		return matchTypedGreedyParserStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes)
+	if step.parser != nil && parserNeedsBacktracking(step) {
+		return matchTypedBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes)
 	}
 
 	mark := len(changes)
@@ -1870,7 +1971,7 @@ func matchTypedStructuredSteps(steps []structuredStep, idx int, dst []any, conte
 	return 0, false, changes[:mark]
 }
 
-func matchStructuredGreedyParserStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+func matchStructuredBacktrackingParserStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	mark := len(changes)
 	rest := content[pos:]
 	end := len(rest)
@@ -1882,8 +1983,13 @@ func matchStructuredGreedyParserStep(steps []structuredStep, idx int, step struc
 		}
 
 		nextChanges := changes
+		segment := rest[:rel]
+		if !backtrackingParserSegmentOK(step.parser, segment) {
+			end = rel
+			continue
+		}
 		if step.parser.dstIndex >= 0 {
-			nextChanges = appendMatchChange(dst, nextChanges, step.parser.dstIndex, maybeTrim(rest[:rel], trimSpace))
+			nextChanges = appendMatchChange(dst, nextChanges, step.parser.dstIndex, maybeTrim(segment, trimSpace))
 		}
 
 		if matchEnd, ok, endChanges := matchStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, nextChanges); ok {
@@ -1903,7 +2009,7 @@ func matchStructuredGreedyParserStep(steps []structuredStep, idx int, step struc
 	return 0, false, changes[:mark]
 }
 
-func matchTypedGreedyParserStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+func matchTypedBacktrackingParserStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
 	mark := len(changes)
 	rest := content[pos:]
 	end := len(rest)
@@ -1915,8 +2021,13 @@ func matchTypedGreedyParserStep(steps []structuredStep, idx int, step structured
 		}
 
 		nextChanges := changes
+		segment := rest[:rel]
+		if !backtrackingParserSegmentOK(step.parser, segment) {
+			end = rel
+			continue
+		}
 		if step.parser.dstIndex >= 0 {
-			nextChanges = appendTypedMatchChange(dst, nextChanges, step.parser.dstIndex, castStructuredValue(rest[:rel], trimSpace, kinds[step.parser.dstIndex]))
+			nextChanges = appendTypedMatchChange(dst, nextChanges, step.parser.dstIndex, castStructuredValue(segment, trimSpace, kinds[step.parser.dstIndex]))
 		}
 
 		if matchEnd, ok, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, kinds, nextChanges); ok {
@@ -1934,6 +2045,20 @@ func matchTypedGreedyParserStep(steps []structuredStep, idx int, step structured
 	}
 
 	return 0, false, changes[:mark]
+}
+
+func backtrackingParserSegmentOK(p *structuredParser, segment string) bool {
+	if p == nil {
+		return false
+	}
+	switch p.kind {
+	case structuredGreedyUntilLiteral:
+		return segment != "" || p.allowEmpty
+	case structuredNotSpace:
+		return segment != "" && strings.IndexAny(segment, " \t\r\n\f\v") < 0
+	default:
+		return false
+	}
 }
 
 func matchStructuredOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange, mark int) (int, bool, []matchChange) {
@@ -1969,6 +2094,9 @@ func matchStructuredStep(step structuredStep, dst []string, content string, pos 
 	case step.literal != "":
 		if !strings.HasPrefix(content[pos:], step.literal) {
 			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			changes = appendMatchChange(dst, changes, step.captureIndex, maybeTrim(content[pos:pos+len(step.literal)], trimSpace))
 		}
 		return pos + len(step.literal), true, changes
 	case step.parser != nil:
@@ -2020,6 +2148,9 @@ func matchTypedStructuredStep(step structuredStep, dst []any, content string, po
 	case step.literal != "":
 		if !strings.HasPrefix(content[pos:], step.literal) {
 			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex]))
 		}
 		return pos + len(step.literal), true, changes
 	case step.parser != nil:
@@ -2096,7 +2227,26 @@ func (m structuredMatcher) quickReject(content string, pos int) bool {
 	if len(content)-pos < m.ir.minWidth {
 		return true
 	}
+	if m.requiresStartWordBoundary(content, pos) {
+		return true
+	}
 	return m.ir.firstLiteralExact && m.ir.firstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.firstLiteral)
+}
+
+func (m structuredMatcher) requiresStartWordBoundary(content string, pos int) bool {
+	if len(m.steps) == 0 || pos <= 0 {
+		return false
+	}
+	step := m.steps[0]
+	if step.optional || step.literal != "" || step.parser == nil {
+		return false
+	}
+	switch step.parser.kind {
+	case structuredMonthName:
+		return isWordByte(content[pos-1])
+	default:
+		return false
+	}
 }
 
 func appendTypedMatchChange(dst []any, changes []typedMatchChange, idx int, value any) []typedMatchChange {
@@ -2158,8 +2308,11 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 		if segment == "" {
 			return 0, "", false
 		}
+		if p.kind == structuredIPOrHost && !isStructuredIPLiteral(segment) && !isHostnameMatchContext(content, pos, next, segment) {
+			return 0, "", false
+		}
 	case structuredHostName:
-		if segment == "" {
+		if segment == "" || !isHostnameMatchContext(content, pos, next, segment) {
 			return 0, "", false
 		}
 	case structuredCharClass:
@@ -2172,6 +2325,18 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 		}
 	case structuredNumber:
 		if !isApacheNumber(segment) {
+			return 0, "", false
+		}
+	case structuredInt:
+		if !isApacheInt(segment) {
+			return 0, "", false
+		}
+	case structuredPosInt:
+		if !isApachePosInt(segment) {
+			return 0, "", false
+		}
+	case structuredNonNegInt:
+		if !isApacheNonNegInt(segment) {
 			return 0, "", false
 		}
 	case structuredMonthName:
@@ -2222,6 +2387,10 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 		if segment == "" && !p.allowEmpty {
 			return 0, "", false
 		}
+	case structuredSpaceOne:
+		if len(segment) != 1 || !isOnlyRegexpSpace(segment) {
+			return 0, "", false
+		}
 	case structuredSpacePlus:
 		if segment == "" || !isOnlyRegexpSpace(segment) {
 			return 0, "", false
@@ -2251,10 +2420,16 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 
 func (p *structuredParser) slice(content string, pos int) (segment string, next int, ok bool) {
 	switch p.kind {
-	case structuredSpacePlus, structuredSpaceStar:
+	case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
 		i := pos
 		for i < len(content) && isRegexpASCIISpace(content[i]) {
 			i++
+		}
+		if p.kind == structuredSpaceOne {
+			if i == pos {
+				return "", 0, false
+			}
+			return content[pos : pos+1], pos + 1, true
 		}
 		if p.kind == structuredSpacePlus && i == pos {
 			return "", 0, false
@@ -2278,8 +2453,8 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredNotSpace:
 			return sliceNotSpaceWithContext(content, pos, p.nextParser, p.nextLiteral)
-		case structuredNumber:
-			return sliceNumberWithContext(content, pos, p.nextParser, p.nextLiteral)
+		case structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt:
+			return sliceNumericWithContext(content, pos, p.nextParser, p.nextLiteral, p.kind)
 		case structuredMonthName, structuredDayName:
 			return sliceAlphaToken(content, pos)
 		case structuredTimeOfDay:
@@ -2302,13 +2477,15 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 	if p.nextLiteral != "" {
 		switch p.kind {
 		case structuredUntilLiteral:
-			if (p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+			if (p.nextParser == structuredSpaceOne || p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
 				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
 			}
 		case structuredGreedyUntilLiteral:
-			if (p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+			if (p.nextParser == structuredSpaceOne || p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
 				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
 			}
+		case structuredCharClass:
+			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredTimestampISO8601:
 			return sliceTimestampISO8601(content, pos)
 		case structuredHTTPDate:
@@ -2361,6 +2538,12 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		return sliceNotSpace(content, pos)
 	case structuredNumber:
 		return sliceNumber(content, pos)
+	case structuredInt:
+		return sliceInt(content, pos)
+	case structuredPosInt:
+		return slicePosInt(content, pos)
+	case structuredNonNegInt:
+		return sliceNonNegInt(content, pos)
 	case structuredMonthName, structuredDayName:
 		return sliceAlphaToken(content, pos)
 	case structuredTimeOfDay:
@@ -2378,7 +2561,7 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 	case structuredLogLevel:
 		return sliceLogLevel(content, pos)
 	case structuredUntilLiteral, structuredGreedyUntilLiteral:
-		return sliceDotRun(content, pos, p.allowEmpty)
+		return sliceDotRun(content, pos, p.allowEmpty, p.dotAll)
 	}
 
 	return content[pos:], len(content), true
@@ -2386,7 +2569,7 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 
 func canParserEndWithoutLiteral(kind structuredKind) bool {
 	switch kind {
-	case structuredWord, structuredHostName, structuredIPOrHost, structuredURIPath, structuredURIPathParam, structuredCharClass, structuredNotSpace, structuredNumber, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredHTTPDate, structuredLogLevel:
+	case structuredWord, structuredHostName, structuredIPOrHost, structuredURIPath, structuredURIPathParam, structuredCharClass, structuredNotSpace, structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpaceOne, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredHTTPDate, structuredLogLevel:
 		return true
 	default:
 		return false
@@ -2474,8 +2657,15 @@ func sliceHostName(content string, pos int) (string, int, bool) {
 		return "", 0, false
 	}
 	for {
+		labelStart := pos
 		for pos < len(content) && (isHostnameStartByte(content[pos]) || content[pos] == '-') {
 			pos++
+		}
+		if pos-labelStart > 63 {
+			if labelStart == start {
+				return "", 0, false
+			}
+			return content[start:labelStart], labelStart, true
 		}
 		if pos >= len(content) || content[pos] != '.' {
 			return content[start:pos], pos, true
@@ -2495,7 +2685,7 @@ func sliceIPOrHost(content string, pos int) (string, int, bool) {
 }
 
 func sliceNotSpaceWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
+	if (nextParser == structuredSpaceOne || nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
 		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral)
 	}
 	return sliceNotSpace(content, pos)
@@ -2506,32 +2696,85 @@ func sliceNumber(content string, pos int) (string, int, bool) {
 	if pos < len(content) && (content[pos] == '+' || content[pos] == '-') {
 		pos++
 	}
-	digits := 0
-	dotSeen := false
-	for pos < len(content) {
-		switch {
-		case content[pos] >= '0' && content[pos] <= '9':
-			digits++
+	digitsStart := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	if pos == digitsStart {
+		if pos >= len(content) || content[pos] != '.' {
+			return "", 0, false
+		}
+		pos++
+		fracStart := pos
+		for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
 			pos++
-		case content[pos] == '.' && !dotSeen:
-			dotSeen = true
+		}
+		if pos == fracStart {
+			return "", 0, false
+		}
+		return content[start:pos], pos, true
+	}
+	if pos < len(content) && content[pos] == '.' && pos+1 < len(content) && content[pos+1] >= '0' && content[pos+1] <= '9' {
+		pos += 2
+		for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
 			pos++
-		default:
-			goto done
 		}
 	}
-done:
-	if digits == 0 {
+	return content[start:pos], pos, true
+}
+
+func sliceInt(content string, pos int) (string, int, bool) {
+	start := pos
+	if pos < len(content) && (content[pos] == '+' || content[pos] == '-') {
+		pos++
+	}
+	digitsStart := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	if pos == digitsStart {
 		return "", 0, false
 	}
 	return content[start:pos], pos, true
 }
 
-func sliceNumberWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
+func slicePosInt(content string, pos int) (string, int, bool) {
+	if pos >= len(content) || content[pos] < '1' || content[pos] > '9' {
+		return "", 0, false
+	}
+	start := pos
+	pos++
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceNonNegInt(content string, pos int) (string, int, bool) {
+	start := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	if pos == start {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceNumericWithContext(content string, pos int, nextParser structuredKind, nextLiteral string, kind structuredKind) (string, int, bool) {
+	if (nextParser == structuredSpaceOne || nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
 		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral)
 	}
-	return sliceNumber(content, pos)
+	switch kind {
+	case structuredInt:
+		return sliceInt(content, pos)
+	case structuredPosInt:
+		return slicePosInt(content, pos)
+	case structuredNonNegInt:
+		return sliceNonNegInt(content, pos)
+	default:
+		return sliceNumber(content, pos)
+	}
 }
 
 func sliceQuoted(content string, pos int) (string, int, bool) {
@@ -2588,7 +2831,7 @@ func sliceLogLevel(content string, pos int) (string, int, bool) {
 }
 
 func sliceLogLevelWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
+	if (nextParser == structuredSpaceOne || nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
 		start := pos
 		for pos < len(content) {
 			c := content[pos]
@@ -2746,9 +2989,9 @@ func sliceDigitsAndPunct(content string, pos int) (string, int, bool) {
 	return content[start:pos], pos, true
 }
 
-func sliceDotRun(content string, pos int, allowEmpty bool) (string, int, bool) {
+func sliceDotRun(content string, pos int, allowEmpty bool, dotAll bool) (string, int, bool) {
 	start := pos
-	for pos < len(content) && content[pos] != '\n' {
+	for pos < len(content) && (dotAll || content[pos] != '\n') {
 		pos++
 	}
 	if !allowEmpty && pos == start {
@@ -2779,10 +3022,18 @@ func sliceIPv6Like(content string, pos int) (string, int, bool) {
 		}
 	}
 done:
-	if pos == start || colons == 0 {
+	if pos == start || colons < 2 {
 		return "", 0, false
 	}
-	return content[start:pos], pos, true
+	segment := content[start:pos]
+	ipSegment := segment
+	if zone := strings.IndexByte(ipSegment, '%'); zone >= 0 {
+		ipSegment = ipSegment[:zone]
+	}
+	if net.ParseIP(ipSegment) == nil || !strings.Contains(ipSegment, ":") {
+		return "", 0, false
+	}
+	return segment, pos, true
 }
 
 func isURIPathChar(c byte) bool {
@@ -2832,6 +3083,42 @@ func isRegexpASCIISpace(b byte) bool {
 	}
 }
 
+func isStructuredIPLiteral(s string) bool {
+	if strings.IndexByte(s, ':') >= 0 {
+		return true
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > 3 {
+			return false
+		}
+		n, ok := parsePositiveInt(part)
+		if !ok || n > 255 {
+			return false
+		}
+	}
+	return true
+}
+
+func isHostnameMatchContext(content string, start int, end int, segment string) bool {
+	if !hasRegexpWordBoundary(content, start) {
+		return false
+	}
+	if strings.HasSuffix(segment, ".") {
+		return true
+	}
+	return hasRegexpWordBoundary(content, end)
+}
+
+func hasRegexpWordBoundary(content string, idx int) bool {
+	prevWord := idx > 0 && isWordByte(content[idx-1])
+	nextWord := idx < len(content) && isWordByte(content[idx])
+	return prevWord != nextWord
+}
+
 func isYearValue(s string) bool {
 	return len(s) == 2 || len(s) == 4
 }
@@ -2873,7 +3160,7 @@ func isSecondValue(s string) bool {
 		}
 	}
 	n, ok := parsePositiveInt(main)
-	return ok && n >= 0 && n <= 60 && len(main) >= 1 && len(main) <= 2
+	return ok && n >= 0 && n <= 60 && len(main) == 2
 }
 
 func parsePositiveInt(s string) (int, bool) {
