@@ -97,7 +97,7 @@ These are custom, user-style composed patterns meant to reflect common applicati
 | Node pino line | 221.8 | 501.0 | 2.3x | 272/176 | 2/2 |
 | Zap console line | 120.0 | 636.3 | 5.3x | 64/144 | 1/2 |
 | Logrus text line | 202.7 | 789.3 | 3.9x | 256/144 | 2/2 |
-| Kubernetes controller-runtime line | 1744.0 | 1833.0 | 1.1x | 272/273 | 2/2 |
+| Kubernetes controller-runtime line | 401.4 | 1759.0 | 4.4x | 320/273 | 2/2 |
 
 ## Notes
 
@@ -112,7 +112,8 @@ These are custom, user-style composed patterns meant to reflect common applicati
 - `RunWithTypeInfo` now uses a typed structured fast path when one exists, rather than first materializing raw strings and then casting them; this is directly relevant to `pipeline-go` because that project switches to typed extraction as soon as a grok field is declared with `:int`, `:float`, `:bool`, or `:string`
 - On a `pipeline-go` style typed access-log pattern, that typed fast path cuts runtime from about `24.2us` to `414ns` while also reaching allocation parity with regexp
 - The same generic machinery also carries over to common user-composed application logs; the current synthetic set spans Go, Java, Python, Node.js, Zap, Logrus, and controller-runtime without adding language-specific hard-coded matchers
-- That broader set currently ranges from near parity on `controller-runtime` style reconcile logs up to about `69x` on access-style Python logs, which matches the underlying rule of thumb: fixed delimiters and stable field order benefit the most
+- That broader set currently ranges from about `2.3x` on `pino`-style logfmt to about `69x` on access-style Python logs, which matches the underlying rule of thumb: fixed delimiters and stable field order benefit the most
+- A new generic parser-chain relaxation now allows `DATA`/`GREEDYDATA` followed by `SPACE` and then a fixed literal to stay on the structured path; that is what moved `controller-runtime` style reconcile logs from parity to about `4.4x`
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`
 - Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, and `Consul` is again slightly behind in this run; that remains a fallback-tuning target rather than a fast-path semantics issue
 - The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples

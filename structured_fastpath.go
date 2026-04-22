@@ -864,7 +864,9 @@ func validateStructuredSteps(steps []structuredStep) bool {
 	for i := range steps {
 		step := steps[i]
 		if step.parser != nil && i+1 < len(steps) && steps[i+1].parser != nil && !canParserEndWithoutLiteral(step.parser.kind) {
-			return false
+			if !canParserBridgeToFutureLiteral(steps, i) {
+				return false
+			}
 		}
 		if step.submatcher != nil && !validateStructuredSteps(step.submatcher.steps) {
 			return false
@@ -876,6 +878,41 @@ func validateStructuredSteps(steps []structuredStep) bool {
 		}
 	}
 	return true
+}
+
+func canParserBridgeToFutureLiteral(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx >= len(steps) {
+		return false
+	}
+	if steps[idx].parser == nil {
+		return false
+	}
+	switch steps[idx].parser.kind {
+	case structuredUntilLiteral, structuredGreedyUntilLiteral:
+	default:
+		return false
+	}
+
+	for i := idx + 1; i < len(steps); i++ {
+		step := steps[i]
+		if step.optional || step.submatcher != nil || len(step.alternatives) > 0 {
+			return false
+		}
+		if step.literal != "" {
+			return true
+		}
+		if step.parser == nil {
+			return false
+		}
+		switch step.parser.kind {
+		case structuredSpacePlus, structuredSpaceStar:
+			continue
+		default:
+			return false
+		}
+	}
+
+	return false
 }
 
 func structuredPrimitiveKind(syntax string) (structuredKind, bool) {

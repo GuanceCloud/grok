@@ -179,6 +179,20 @@ func TestCommonComposedPatternsMatchRegexp(t *testing.T) {
 	}
 }
 
+func TestControllerRuntimePatternUsesFastMatcher(t *testing.T) {
+	fixtures := loadCommonPatternFixtures(t)
+	for _, fixture := range fixtures {
+		if fixture.name != "k8s_controller_runtime" {
+			continue
+		}
+		if fixture.current.fastMatcher == nil {
+			t.Fatal("expected controller-runtime pattern to use structured fast matcher")
+		}
+		return
+	}
+	t.Fatal("expected controller-runtime fixture")
+}
+
 func BenchmarkCommonComposedPatterns(b *testing.B) {
 	fixtures := loadCommonPatternFixtures(b)
 	if len(fixtures) == 0 {
