@@ -610,7 +610,7 @@ func TestStructuredNginxErrorPatternUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, "47.98.103.73", ret[g.nameIndex["ip_or_host"]])
 }
 
-func TestStructuredPostgreSQLPatternFallsBackToRegexp(t *testing.T) {
+func TestStructuredPostgreSQLPatternUsesFastMatcher(t *testing.T) {
 	var script, line string
 	for _, c := range loadDatakitFixtureCases(t) {
 		if c.Collector != "postgresql" {
@@ -633,8 +633,11 @@ func TestStructuredPostgreSQLPatternFallsBackToRegexp(t *testing.T) {
 	}
 
 	g := compiled[0].current
-	if g.fastMatcher != nil {
-		t.Fatal("expected postgresql pattern to fall back to regexp")
+	if g.fastMatcher == nil {
+		t.Fatal("expected postgresql pattern to use structured fast matcher")
+	}
+	if !g.fastMatcher.backtracking {
+		t.Fatal("expected postgresql pattern to use backtracking fast matcher")
 	}
 
 	ret, err := g.Run(line, true)
@@ -650,6 +653,36 @@ func TestStructuredPostgreSQLPatternFallsBackToRegexp(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", ret[g.nameIndex["remote_host"]])
 	assert.Equal(t, "60b48f01.12241", ret[g.nameIndex["session_id"]])
 	assert.Equal(t, "LOG", ret[g.nameIndex["status"]])
+}
+
+func TestStructuredGreedyLiteralBacktracksLikeRegexp(t *testing.T) {
+	pattern := `\[%{GREEDYDATA:application}\]%{SPACE}%{USER:user}%{SPACE}\[%{HOST:remote_host}\]`
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected greedy literal pattern to use structured fast matcher")
+	}
+	if !current.fastMatcher.backtracking {
+		t.Fatal("expected greedy literal pattern to require backtracking")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `[pgAdmin 4 - DB:postgres] postgres [127.0.0.1]`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, "pgAdmin 4 - DB:postgres", fastRet[current.nameIndex["application"]])
+	assert.Equal(t, "postgres", fastRet[current.nameIndex["user"]])
+	assert.Equal(t, "127.0.0.1", fastRet[current.nameIndex["remote_host"]])
 }
 
 func TestStructuredRedisFixtureUsesFastMatcher(t *testing.T) {

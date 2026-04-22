@@ -215,6 +215,9 @@ func matcherWrites(steps []structuredStep) bool {
 
 func matcherNeedsBacktracking(steps []structuredStep) bool {
 	for i := range steps {
+		if parserNeedsBacktracking(steps[i]) {
+			return true
+		}
 		if steps[i].optional && !isDeterministicOptionalStep(steps, i) {
 			return true
 		}
@@ -233,6 +236,9 @@ func matcherNeedsBacktracking(steps []structuredStep) bool {
 func matcherNeedsChangeLog(steps []structuredStep) bool {
 	for i := range steps {
 		step := steps[i]
+		if parserNeedsBacktracking(step) && step.parser.dstIndex >= 0 {
+			return true
+		}
 		if step.optional && !isDeterministicOptionalStep(steps, i) {
 			return true
 		}
@@ -251,6 +257,10 @@ func matcherNeedsChangeLog(steps []structuredStep) bool {
 		}
 	}
 	return false
+}
+
+func parserNeedsBacktracking(step structuredStep) bool {
+	return step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != ""
 }
 
 func matcherChangeCapacity(steps []structuredStep) int {
@@ -334,12 +344,6 @@ func shouldUseStructuredMatcher(steps []structuredStep) bool {
 	// regexp when the line is mostly nested subpatterns plus a single greedy
 	// tail. Keep the compiler support, but let these stay on regexp for now.
 	if stats.optionalCount == 0 && stats.greedyParserCount == 1 && stats.dataParserCount == 1 && stats.submatcherCount >= 4 && stats.alternativeCount >= 4 && stats.parserCount >= 18 {
-		return false
-	}
-	// Highly optional, nested patterns still require regexp-style backtracking
-	// to preserve capture alignment. PostgreSQL's default fixture is the
-	// representative case here.
-	if stats.optionalCount >= 2 && stats.submatcherCount >= 5 && stats.parserCount >= 10 {
 		return false
 	}
 	return true
@@ -1174,16 +1178,54 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 	}
 
 	step := steps[idx]
+	if step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != "" {
+		return matchStructuredGreedyParserStep(steps, idx, step, dst, content, pos, trimSpace, changes)
+	}
+
 	mark := len(changes)
+	if step.optional {
+		return matchStructuredOptionalStep(steps, idx, step, dst, content, pos, trimSpace, changes, mark)
+	}
+
 	next, ok, nextChanges := matchStructuredStep(step, dst, content, pos, trimSpace, changes)
-	if ok {
-		if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
-			return end, true, endChanges
+	if !ok {
+		return 0, false, changes[:mark]
+	}
+
+	if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
+		return end, true, endChanges
+	}
+
+	if step.writes {
+		rollbackMatchChanges(dst, nextChanges, mark)
+	}
+	return 0, false, changes[:mark]
+}
+
+func matchStructuredGreedyParserStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	mark := len(changes)
+	rest := content[pos:]
+	end := len(rest)
+
+	for {
+		rel := lastLiteralIndex(rest[:end], step.parser.nextLiteral)
+		if rel < 0 {
+			break
 		}
-		if step.writes {
+
+		nextChanges := changes
+		if step.parser.dstIndex >= 0 {
+			nextChanges = appendMatchChange(dst, nextChanges, step.parser.dstIndex, maybeTrim(rest[:rel], trimSpace))
+		}
+
+		if matchEnd, ok, endChanges := matchStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, nextChanges); ok {
+			return matchEnd, true, endChanges
+		}
+		if len(nextChanges) > mark {
 			rollbackMatchChanges(dst, nextChanges, mark)
 		}
-		nextChanges = nextChanges[:mark]
+
+		end = rel
 	}
 
 	if step.optional {
@@ -1191,6 +1233,20 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 	}
 
 	return 0, false, changes[:mark]
+}
+
+func matchStructuredOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange, mark int) (int, bool, []matchChange) {
+	next, ok, nextChanges := matchStructuredStep(step, dst, content, pos, trimSpace, changes)
+	if ok {
+		if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
+			return end, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackMatchChanges(dst, nextChanges, mark)
+		}
+	}
+
+	return matchStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, changes[:mark])
 }
 
 func matchStructuredStep(step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
