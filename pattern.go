@@ -176,43 +176,51 @@ func parsePatternRef(spec string) (patternRef, bool, error) {
 	}
 }
 
-func normalizeTopLevelCapture(raw string) string {
-	if len(raw) < 2 || raw[0] != '(' || raw[len(raw)-1] != ')' {
-		return raw
-	}
-	if len(raw) > 1 && raw[1] == '?' {
+func normalizeAnonymousCaptures(raw string) string {
+	if len(raw) < 2 {
 		return raw
 	}
 
-	depth := 0
 	for i := 0; i < len(raw); i++ {
-		if raw[i] == '\\' {
-			if i+1 < len(raw) {
-				if raw[i+1] >= '1' && raw[i+1] <= '9' {
-					return raw
-				}
-				i++
-			}
+		if raw[i] != '\\' || i+1 >= len(raw) {
 			continue
 		}
+		if raw[i+1] >= '1' && raw[i+1] <= '9' {
+			return raw
+		}
+		i++
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(raw))
+	inClass := false
+
+	for i := 0; i < len(raw); i++ {
 		switch raw[i] {
+		case '\\':
+			builder.WriteByte(raw[i])
+			if i+1 < len(raw) {
+				i++
+				builder.WriteByte(raw[i])
+			}
+		case '[':
+			inClass = true
+			builder.WriteByte(raw[i])
+		case ']':
+			inClass = false
+			builder.WriteByte(raw[i])
 		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 && i != len(raw)-1 {
-				return raw
+			if inClass || (i+1 < len(raw) && raw[i+1] == '?') {
+				builder.WriteByte(raw[i])
+				continue
 			}
-			if depth < 0 {
-				return raw
-			}
+			builder.WriteString("(?:")
+		default:
+			builder.WriteByte(raw[i])
 		}
 	}
 
-	if depth != 0 {
-		return raw
-	}
-	return "(?:" + raw[1:len(raw)-1] + ")"
+	return builder.String()
 }
 
 func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error) error {
@@ -254,7 +262,7 @@ func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error
 func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 	*GrokPattern, error,
 ) {
-	input = normalizeTopLevelCapture(input)
+	input = normalizeAnonymousCaptures(input)
 	gPattern := &GrokPattern{
 		varbType: make(map[string]string),
 		pattern:  input,

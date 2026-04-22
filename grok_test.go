@@ -22,21 +22,25 @@ func TestDenormalizeGlobalPatterns(t *testing.T) {
 	}
 }
 
-func TestNormalizeTopLevelCapture(t *testing.T) {
+func TestNormalizeAnonymousCaptures(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
 	}{
 		{in: `(DEBUG|INFO|WARN|ERROR|FATAL)`, want: `(?:DEBUG|INFO|WARN|ERROR|FATAL)`},
 		{in: `([.0-9a-z]*)`, want: `(?:[.0-9a-z]*)`},
+		{in: `(foo)(bar)`, want: `(?:foo)(?:bar)`},
+		{in: `(foo(?:bar))(baz)`, want: `(?:foo(?:bar))(?:baz)`},
 		{in: `(?:LOG|ERROR)`, want: `(?:LOG|ERROR)`},
+		{in: `(?P<name>LOG|ERROR)`, want: `(?P<name>LOG|ERROR)`},
+		{in: `\(`, want: `\(`},
+		{in: `[()]`, want: `[()]`},
 		{in: `((foo))\1`, want: `((foo))\1`},
-		{in: `(foo)(bar)`, want: `(foo)(bar)`},
 	}
 
 	for _, tc := range cases {
-		if got := normalizeTopLevelCapture(tc.in); got != tc.want {
-			t.Fatalf("normalizeTopLevelCapture(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := normalizeAnonymousCaptures(tc.in); got != tc.want {
+			t.Fatalf("normalizeAnonymousCaptures(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
