@@ -113,6 +113,9 @@ func (g *GrokRegexp) Run(content string, trimSpace bool) ([]string, error) {
 
 func (g *GrokRegexp) runTo(content string, trimSpace bool, dst []string) ([]string, error) {
 	if g.fastMatcher != nil {
+		if g.fastMatcher.quickReject(content, 0) {
+			return nil, ErrMismatch
+		}
 		result := ensureStringBuffer(dst, len(g.subMatchNames.name))
 		if g.fastMatcher.match(result, content, trimSpace) {
 			return result, nil
@@ -142,6 +145,9 @@ func (g *GrokRegexp) RunWithTypeInfo(content string, trimSpace bool) ([]any, err
 }
 
 func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any) ([]any, error) {
+	if g.fastMatcher != nil && g.fastMatcher.quickReject(content, 0) {
+		return nil, ErrMismatch
+	}
 	match, err := g.matchIndexes(content)
 	if err != nil {
 		return nil, err

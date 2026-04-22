@@ -4,6 +4,7 @@ import "strings"
 
 type structuredMatcher struct {
 	steps        []structuredStep
+	ir           structuredIRInfo
 	writes       bool
 	backtracking bool
 	changeLog    bool
@@ -26,7 +27,19 @@ type structuredStep struct {
 	optPrefix             string
 	optPrefixSkips        bool
 	deterministicOptional bool
+	tailMinWidth          int
+	ir                    structuredIRInfo
+	nextIR                structuredIRInfo
 	writes                bool
+}
+
+type structuredIRInfo struct {
+	minWidth          int
+	nullable          bool
+	firstLiteral      string
+	firstLiteralExact bool
+	lastLiteral       string
+	lastLiteralExact  bool
 }
 
 type structuredParser struct {
@@ -91,6 +104,7 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 
 	matcher := structuredMatcher{
 		steps:        steps,
+		ir:           buildStructuredMatcherIR(steps),
 		writes:       matcherWrites(steps),
 		backtracking: matcherNeedsBacktracking(steps),
 		changeLog:    matcherNeedsChangeLog(steps),
@@ -101,13 +115,9 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 
 func configureStructuredSteps(steps []structuredStep) {
 	for i := range steps {
-		if steps[i].parser != nil {
-			steps[i].parser.nextLiteral = nextStructuredLiteral(steps, i+1)
-			steps[i].parser.nextParser, steps[i].parser.hasNextParser = nextStructuredParserKind(steps, i+1)
-			steps[i].writes = steps[i].parser.dstIndex >= 0
-		}
 		if steps[i].submatcher != nil {
 			configureStructuredSteps(steps[i].submatcher.steps)
+			steps[i].submatcher.ir = buildStructuredMatcherIR(steps[i].submatcher.steps)
 			steps[i].submatcher.writes = matcherWrites(steps[i].submatcher.steps)
 			steps[i].submatcher.backtracking = matcherNeedsBacktracking(steps[i].submatcher.steps)
 			steps[i].submatcher.changeLog = matcherNeedsChangeLog(steps[i].submatcher.steps)
@@ -116,11 +126,39 @@ func configureStructuredSteps(steps []structuredStep) {
 		}
 		for _, alt := range steps[i].alternatives {
 			configureStructuredSteps(alt.steps)
+			alt.ir = buildStructuredMatcherIR(alt.steps)
 			alt.writes = matcherWrites(alt.steps)
 			alt.backtracking = matcherNeedsBacktracking(alt.steps)
 			alt.changeLog = matcherNeedsChangeLog(alt.steps)
 			alt.changeCap = matcherChangeCapacity(alt.steps)
 			steps[i].writes = steps[i].writes || alt.writes
+		}
+		if steps[i].captureIndex >= 0 {
+			steps[i].writes = true
+		}
+		if steps[i].parser != nil {
+			steps[i].writes = steps[i].writes || steps[i].parser.dstIndex >= 0
+		}
+	}
+
+	tailMinWidth := 0
+	nextIR := emptyStructuredIRInfo()
+	for i := len(steps) - 1; i >= 0; i-- {
+		steps[i].ir = buildStructuredStepIR(steps[i])
+		steps[i].nextIR = nextIR
+		requiredMinWidth := steps[i].ir.minWidth
+		if steps[i].optional {
+			requiredMinWidth = 0
+		}
+		steps[i].tailMinWidth = tailMinWidth + requiredMinWidth
+		tailMinWidth = steps[i].tailMinWidth
+		nextIR = combineStructuredIR(steps[i].ir, nextIR)
+	}
+
+	for i := range steps {
+		if steps[i].parser != nil {
+			steps[i].parser.nextLiteral = nextStructuredSlicingLiteral(steps, i+1)
+			steps[i].parser.nextParser, steps[i].parser.hasNextParser = nextStructuredParserKind(steps, i+1)
 		}
 		if len(steps[i].alternatives) > 0 {
 			steps[i].altPrefixes = buildAlternativePrefixes(steps[i].alternatives)
@@ -129,15 +167,229 @@ func configureStructuredSteps(steps []structuredStep) {
 			if steps[i].parser != nil && steps[i].parser.nextLiteral != "" && !steps[i].parser.allowEmpty {
 				steps[i].optPrefix = steps[i].parser.nextLiteral
 				steps[i].optPrefixSkips = true
-			} else if prefix, ok := firstStructuredLiteral(steps[i]); ok {
-				steps[i].optPrefix = prefix
+			} else if steps[i].ir.firstLiteralExact {
+				steps[i].optPrefix = steps[i].ir.firstLiteral
 				steps[i].optPrefixSkips = false
 			}
 			steps[i].deterministicOptional = isDeterministicOptionalStep(steps, i)
 		}
-		if steps[i].captureIndex >= 0 {
-			steps[i].writes = true
+	}
+}
+
+func buildStructuredMatcherIR(steps []structuredStep) structuredIRInfo {
+	info := emptyStructuredIRInfo()
+	if len(steps) == 0 {
+		return info
+	}
+
+	for i := range steps {
+		stepInfo := steps[i].ir
+		info.minWidth += stepInfo.minWidth
+		if !stepInfo.nullable {
+			info.nullable = false
 		}
+	}
+
+	info.firstLiteral, info.firstLiteralExact = matcherBoundaryLiteral(steps, true)
+	info.lastLiteral, info.lastLiteralExact = matcherBoundaryLiteral(steps, false)
+	return info
+}
+
+func emptyStructuredIRInfo() structuredIRInfo {
+	return structuredIRInfo{
+		nullable:          true,
+		firstLiteralExact: true,
+		lastLiteralExact:  true,
+	}
+}
+
+func combineStructuredIR(parts ...structuredIRInfo) structuredIRInfo {
+	info := emptyStructuredIRInfo()
+	if len(parts) == 0 {
+		return info
+	}
+	for _, part := range parts {
+		info.minWidth += part.minWidth
+		if !part.nullable {
+			info.nullable = false
+		}
+	}
+	info.firstLiteral, info.firstLiteralExact = irBoundaryLiteral(parts, true)
+	info.lastLiteral, info.lastLiteralExact = irBoundaryLiteral(parts, false)
+	return info
+}
+
+func buildStructuredStepIR(step structuredStep) structuredIRInfo {
+	info := structuredIRInfo{}
+
+	switch {
+	case step.literal != "":
+		info.minWidth = len(step.literal)
+		info.firstLiteral = step.literal
+		info.lastLiteral = step.literal
+		info.firstLiteralExact = true
+		info.lastLiteralExact = true
+	case step.parser != nil:
+		info.minWidth = parserMinWidth(step.parser)
+		info.nullable = step.parser.allowEmpty
+	case step.submatcher != nil:
+		info = step.submatcher.ir
+	case len(step.alternatives) > 0:
+		info = buildAlternativeIR(step.alternatives)
+	default:
+		info.nullable = true
+		info.firstLiteralExact = true
+		info.lastLiteralExact = true
+	}
+
+	if step.optional {
+		info.nullable = true
+		info.minWidth = 0
+	}
+
+	return info
+}
+
+func buildAlternativeIR(alts []*structuredMatcher) structuredIRInfo {
+	info := structuredIRInfo{nullable: false}
+	if len(alts) == 0 {
+		info.nullable = true
+		info.firstLiteralExact = true
+		info.lastLiteralExact = true
+		return info
+	}
+
+	minWidth := -1
+	firstLiteral := ""
+	firstExact := true
+	lastLiteral := ""
+	lastExact := true
+	nullable := false
+
+	for i, alt := range alts {
+		altInfo := alt.ir
+		if i == 0 || altInfo.minWidth < minWidth {
+			minWidth = altInfo.minWidth
+		}
+		nullable = nullable || altInfo.nullable
+
+		if i == 0 {
+			firstLiteral = altInfo.firstLiteral
+			firstExact = altInfo.firstLiteralExact
+			lastLiteral = altInfo.lastLiteral
+			lastExact = altInfo.lastLiteralExact
+			continue
+		}
+		if firstLiteral != altInfo.firstLiteral || !altInfo.firstLiteralExact {
+			firstLiteral = ""
+			firstExact = false
+		}
+		if lastLiteral != altInfo.lastLiteral || !altInfo.lastLiteralExact {
+			lastLiteral = ""
+			lastExact = false
+		}
+	}
+
+	info.minWidth = minWidth
+	info.nullable = nullable
+	info.firstLiteral = firstLiteral
+	info.firstLiteralExact = firstExact && firstLiteral != ""
+	info.lastLiteral = lastLiteral
+	info.lastLiteralExact = lastExact && lastLiteral != ""
+	return info
+}
+
+func matcherBoundaryLiteral(steps []structuredStep, forward bool) (string, bool) {
+	parts := make([]structuredIRInfo, 0, len(steps))
+	for i := range steps {
+		parts = append(parts, steps[i].ir)
+	}
+	return irBoundaryLiteral(parts, forward)
+}
+
+func irBoundaryLiteral(parts []structuredIRInfo, forward bool) (string, bool) {
+	var candidate string
+	haveCandidate := false
+
+	if forward {
+		for i := 0; i < len(parts); i++ {
+			stepInfo := parts[i]
+			if stepInfo.firstLiteral != "" && stepInfo.firstLiteralExact {
+				if !haveCandidate {
+					candidate = stepInfo.firstLiteral
+					haveCandidate = true
+				} else if candidate != stepInfo.firstLiteral {
+					return "", false
+				}
+			} else if stepInfo.nullable {
+				return "", false
+			}
+			if !stepInfo.nullable {
+				if haveCandidate {
+					return candidate, true
+				}
+				return "", false
+			}
+		}
+		return "", false
+	}
+
+	for i := len(parts) - 1; i >= 0; i-- {
+		stepInfo := parts[i]
+		if stepInfo.lastLiteral != "" && stepInfo.lastLiteralExact {
+			if !haveCandidate {
+				candidate = stepInfo.lastLiteral
+				haveCandidate = true
+			} else if candidate != stepInfo.lastLiteral {
+				return "", false
+			}
+		} else if stepInfo.nullable {
+			return "", false
+		}
+		if !stepInfo.nullable {
+			if haveCandidate {
+				return candidate, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func parserMinWidth(p *structuredParser) int {
+	if p == nil {
+		return 0
+	}
+	switch p.kind {
+	case structuredWord, structuredNotSpace, structuredHostName, structuredNumber, structuredCharClass:
+		if p.allowEmpty {
+			return 0
+		}
+		return 1
+	case structuredMonthName:
+		return 2
+	case structuredDayName:
+		return 3
+	case structuredTimeOfDay:
+		return 4
+	case structuredYear:
+		return 2
+	case structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond:
+		return 1
+	case structuredQuoted:
+		return 2
+	case structuredUntilLiteral, structuredGreedyUntilLiteral, structuredSpaceStar:
+		return 0
+	case structuredSpacePlus:
+		return 1
+	case structuredTimestampISO8601:
+		return 13
+	case structuredHTTPDate:
+		return 20
+	case structuredLogLevel:
+		return 2
+	default:
+		return 0
 	}
 }
 
@@ -148,11 +400,10 @@ func buildAlternativePrefixes(alts []*structuredMatcher) []string {
 
 	prefixes := make([]string, len(alts))
 	for i, alt := range alts {
-		prefix := nextStructuredLiteral(alt.steps, 0)
-		if prefix == "" {
+		if !alt.ir.firstLiteralExact || alt.ir.firstLiteral == "" {
 			return nil
 		}
-		prefixes[i] = prefix
+		prefixes[i] = alt.ir.firstLiteral
 	}
 
 	for i := range prefixes {
@@ -185,7 +436,10 @@ func isDeterministicOptionalStep(steps []structuredStep, idx int) bool {
 	if !ok || curPrefix == "" {
 		return false
 	}
-	nextPrefix := nextStructuredLiteral(steps, idx+1)
+	nextPrefix := ""
+	if steps[idx].nextIR.firstLiteralExact {
+		nextPrefix = steps[idx].nextIR.firstLiteral
+	}
 	if nextPrefix == "" {
 		return false
 	}
@@ -905,11 +1159,24 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 	return class, true
 }
 
-func nextStructuredLiteral(steps []structuredStep, start int) string {
+func nextStructuredSlicingLiteral(steps []structuredStep, start int) string {
 	for i := start; i < len(steps); i++ {
-		if lit, ok := firstStructuredLiteral(steps[i]); ok {
-			return lit
+		step := steps[i]
+		if step.optional {
+			return ""
 		}
+		if step.literal != "" {
+			return step.literal
+		}
+		if step.parser != nil {
+			switch step.parser.kind {
+			case structuredSpacePlus, structuredSpaceStar:
+				continue
+			default:
+				return ""
+			}
+		}
+		return ""
 	}
 	return ""
 }
@@ -932,29 +1199,18 @@ func firstStructuredLiteral(step structuredStep) (string, bool) {
 	case step.literal != "":
 		return step.literal, true
 	case step.submatcher != nil:
-		return nextStructuredLiteral(step.submatcher.steps, 0), nextStructuredLiteral(step.submatcher.steps, 0) != ""
+		return step.submatcher.ir.firstLiteral, step.submatcher.ir.firstLiteralExact && step.submatcher.ir.firstLiteral != ""
 	case len(step.alternatives) > 0:
-		var common string
-		for idx, alt := range step.alternatives {
-			lit := nextStructuredLiteral(alt.steps, 0)
-			if lit == "" {
-				return "", false
-			}
-			if idx == 0 {
-				common = lit
-				continue
-			}
-			if lit != common {
-				return "", false
-			}
-		}
-		return common, common != ""
+		return step.ir.firstLiteral, step.ir.firstLiteralExact && step.ir.firstLiteral != ""
 	default:
 		return "", false
 	}
 }
 
 func (m structuredMatcher) match(dst []string, content string, trimSpace bool) bool {
+	if m.quickReject(content, 0) {
+		return false
+	}
 	if !m.backtracking && !m.changeLog {
 		next, ok := m.matchLinearFrom(dst, content, 0, trimSpace)
 		return ok && next >= 0
@@ -981,6 +1237,9 @@ func (m structuredMatcher) match(dst []string, content string, trimSpace bool) b
 }
 
 func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
 	if !m.backtracking && !m.changeLog && changes == nil {
 		next, ok := m.matchLinearFrom(dst, content, pos, trimSpace)
 		return next, ok, nil
@@ -992,6 +1251,9 @@ func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, t
 }
 
 func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int, trimSpace bool) (int, bool) {
+	if m.quickReject(content, pos) {
+		return 0, false
+	}
 	for _, step := range m.steps {
 		var next int
 		var ok bool
@@ -1086,6 +1348,9 @@ func shouldSkipOptionalParser(p *structuredParser, step structuredStep, content 
 }
 
 func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
 	for _, step := range m.steps {
 		var next int
 		var ok bool
@@ -1175,6 +1440,9 @@ func (m structuredMatcher) matchBacktrackingFrom(dst []string, content string, p
 func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	if idx >= len(steps) {
 		return pos, true, changes
+	}
+	if len(content)-pos < steps[idx].tailMinWidth {
+		return 0, false, changes
 	}
 
 	step := steps[idx]
@@ -1310,6 +1578,13 @@ func matchingAlternatives(step structuredStep, content string, pos int) []*struc
 		}
 	}
 	return nil
+}
+
+func (m structuredMatcher) quickReject(content string, pos int) bool {
+	if len(content)-pos < m.ir.minWidth {
+		return true
+	}
+	return m.ir.firstLiteralExact && m.ir.firstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.firstLiteral)
 }
 
 func appendMatchChange(dst []string, changes []matchChange, idx int, value string) []matchChange {

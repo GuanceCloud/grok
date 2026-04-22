@@ -8,44 +8,47 @@ These numbers compare the current structured fast path with the same patterns fo
 - OS/Arch: `linux/amd64`
 - CPU: `AMD Ryzen 7 9700X 8-Core Processor`
 - Command:
-  - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=300ms`
-  - `go test -run '^$' -bench '^BenchmarkRunStructuredLogLevelUTF(|RegexpPath)$' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
+  - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
 
 ## Summary
 
 - Scope: `24` real grok-backed fixture cases from `testdata/datakit_pipeline_cases.json`
-- Result: `20/24` cases show clear gains over `regexp`, `3/24` are effectively at parity, and only `1/24` is slightly slower in the full aggregate run
+- Result: `21/24` cases show clear gains over `regexp`; only `Apache error`, `Consul`, and `MySQL slow log` remain slightly slower in this run
 - Biggest wins: Elasticsearch, Jenkins, RabbitMQ, Apache access, Nginx access, PostgreSQL, SQLServer
-- Generic improvement in this round: nested optional/submatcher patterns that contain `GREEDYDATA` followed by repeated suffix literals now backtrack like `regexp`, which lets real user-composed layouts such as PostgreSQL stay on the fast path without capture drift
+- Generic improvements in this round:
+  - structured matchers now carry lightweight IR metadata (`minWidth`, nullability, stable boundary literals) that is used both at compile time and at match time
+  - parser context slicing now distinguishes a safe boundary literal from an exact suffix literal, so user-composed patterns like `NOTSPACE + SPACE + literal` keep their fast path without overfitting to specific fixtures
+  - `Run` now uses the IR to reject obvious mismatches before allocating result buffers, which makes short failures zero-allocation and faster than the regexp path
 
 ## Datakit Fixtures
 
 | Fixture | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Apache access | 200.7 | 1752.0 | 8.7x | 288/208 | 2/2 |
-| Apache error | 3505.0 | 3392.0 | 1.0x | 144/144 | 2/2 |
-| Consul | 9177.0 | 9308.0 | 1.0x | 146/144 | 2/2 |
-| Dameng | 122.4 | 723.6 | 5.9x | 48/112 | 1/2 |
-| Elasticsearch log | 236.1 | 8001.0 | 33.9x | 256/146 | 2/2 |
-| Elasticsearch index slow log | 319.8 | 6336.0 | 19.8x | 272/177 | 2/2 |
-| Elasticsearch search slow log | 399.2 | 13104.0 | 32.8x | 272/179 | 2/2 |
-| Jenkins | 131.2 | 1685.0 | 12.8x | 240/112 | 2/2 |
-| Kafka | 154.9 | 1512.0 | 9.8x | 64/144 | 1/2 |
-| Kingbase | 153.2 | 606.5 | 4.0x | 64/144 | 1/2 |
-| MySQL | 84.93 | 880.8 | 10.4x | 64/144 | 1/2 |
-| MySQL slow log | 1985.0 | 2032.0 | 1.0x | 498/497 | 2/2 |
-| Nginx access | 325.7 | 2378.0 | 7.3x | 560/305 | 3/2 |
-| Nginx error log 1 | 421.3 | 2784.0 | 6.6x | 592/337 | 3/2 |
-| Nginx error log 2 | 133.6 | 633.1 | 4.7x | 48/112 | 1/2 |
-| PostgreSQL | 588.5 | 5595.0 | 9.5x | 320/272 | 2/2 |
-| RabbitMQ | 68.07 | 1212.0 | 17.8x | 48/112 | 1/2 |
-| Redis | 170.7 | 543.7 | 3.2x | 80/176 | 1/2 |
-| Solr | 170.0 | 795.3 | 4.7x | 64/144 | 1/2 |
-| SQLServer | 79.88 | 833.6 | 10.4x | 48/112 | 1/2 |
-| TDengine 200 | 2834.0 | 2932.0 | 1.0x | 144/144 | 2/2 |
-| TDengine 204 | 3640.0 | 3636.0 | 1.0x | 144/144 | 2/2 |
-| Tomcat access | 300.2 | 1008.0 | 3.4x | 560/305 | 3/2 |
-| Tomcat catalina | 212.4 | 901.7 | 4.2x | 80/176 | 1/2 |
+| Apache access | 232.8 | 1742.0 | 7.5x | 288/208 | 2/2 |
+| Apache error | 3850.0 | 3791.0 | 1.0x | 144/144 | 2/2 |
+| Consul | 9597.0 | 9280.0 | 1.0x | 147/144 | 2/2 |
+| Dameng | 173.1 | 749.4 | 4.3x | 48/112 | 1/2 |
+| Elasticsearch log | 293.0 | 8573.0 | 29.3x | 256/147 | 2/2 |
+| Elasticsearch index slow log | 398.1 | 6248.0 | 15.7x | 272/176 | 2/2 |
+| Elasticsearch search slow log | 484.0 | 13558.0 | 28.0x | 272/176 | 2/2 |
+| Jenkins | 152.4 | 1696.0 | 11.1x | 240/112 | 2/2 |
+| Kafka | 199.0 | 1526.0 | 7.7x | 64/144 | 1/2 |
+| Kingbase | 208.2 | 613.5 | 2.9x | 64/144 | 1/2 |
+| MySQL | 109.4 | 864.0 | 7.9x | 64/144 | 1/2 |
+| MySQL slow log | 2018.0 | 2009.0 | 1.0x | 499/498 | 2/2 |
+| Nginx access | 376.7 | 2401.0 | 6.4x | 560/304 | 3/2 |
+| Nginx error log 1 | 499.9 | 3077.0 | 6.2x | 592/337 | 3/2 |
+| Nginx error log 2 | 178.5 | 640.1 | 3.6x | 48/112 | 1/2 |
+| PostgreSQL | 724.8 | 5593.0 | 7.7x | 320/273 | 2/2 |
+| RabbitMQ | 79.50 | 1214.0 | 15.3x | 48/112 | 1/2 |
+| Redis | 188.9 | 555.1 | 2.9x | 80/176 | 1/2 |
+| Solr | 189.6 | 806.4 | 4.3x | 64/144 | 1/2 |
+| SQLServer | 97.31 | 783.8 | 8.1x | 48/112 | 1/2 |
+| TDengine 200 | 3070.0 | 3086.0 | 1.0x | 144/144 | 2/2 |
+| TDengine 204 | 4045.0 | 4171.0 | 1.0x | 145/144 | 2/2 |
+| Tomcat access | 344.9 | 1038.0 | 3.0x | 560/304 | 3/2 |
+| Tomcat catalina | 241.0 | 931.1 | 3.9x | 80/176 | 1/2 |
 
 ## UTF Micro Benchmark
 
@@ -53,7 +56,7 @@ This verifies that the fast path still behaves well with UTF content and Unicode
 
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Structured LOGLEVEL with UTF message | 83.97 | 453.5 | 5.4x | 48/112 | 1/2 |
+| Structured LOGLEVEL with UTF message | 89.11 | 452.1 | 5.1x | 48/112 | 1/2 |
 
 ## Common Pattern Micro Benchmarks
 
@@ -61,16 +64,19 @@ These are small focused checks for common upstream grok layouts outside the Data
 
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Structured SYSLOG line | 148.0 | 4743.0 | 32.0x | 48/114 | 1/2 |
+| Structured SYSLOG line | 171.4 | 4693.0 | 27.4x | 48/113 | 1/2 |
+| Structured short mismatch | 2.688 | 4.682 | 1.7x | 0/0 | 0/0 |
 
 ## Notes
 
-- Near-parity or slightly slower cases today: `Apache error`, `MySQL slow log`, `TDengine 200`, and `TDengine 204`
+- Slightly slower cases today: `Apache error`, `Consul`, and `MySQL slow log`
 - Regex-only paths now avoid extra unnamed capture groups for plain `%{PATTERN}` expansion, which lowers `B/op` substantially on many real patterns even when the fast path is disabled
 - Regex-only paths now also normalize nested anonymous grouping such as `(foo)(bar)` or `(\[%{GREEDYDATA}\])` into non-capturing form when no numeric backreferences are present. This trims submatch bookkeeping for user-defined composed patterns without changing named captures.
 - User-defined patterns that wrap the whole expression in a redundant anonymous capture, such as `(LOG|ERROR|...)` or `([.0-9a-z]*)`, now get normalized to non-capturing form before denormalization; this trims regex work without changing exposed named fields
 - Structured literal parsing now understands repeated plain literals such as ` +` and ` *`, which lets common syslog-style upstream patterns reach the fast path without hard-coding product-specific matchers
 - Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
+- Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
+- `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`
-- Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, but the current run no longer shows a material regression on `Consul`; that fixture is now essentially parity with a slight edge to the current path
+- Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, and `Consul` is again slightly behind in this run; that remains a fallback-tuning target rather than a fast-path semantics issue
 - The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples

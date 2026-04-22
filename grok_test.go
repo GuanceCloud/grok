@@ -45,6 +45,36 @@ func TestNormalizeAnonymousCaptures(t *testing.T) {
 	}
 }
 
+func TestStructuredIRMetadata(t *testing.T) {
+	g, err := CompilePattern(`%{WORD:name} - %{INT:id}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected structured matcher")
+	}
+	if got, want := g.fastMatcher.ir.minWidth, 5; got != want {
+		t.Fatalf("minWidth = %d, want %d", got, want)
+	}
+	if g.fastMatcher.ir.firstLiteral != "" {
+		t.Fatalf("unexpected firstLiteral %q", g.fastMatcher.ir.firstLiteral)
+	}
+
+	optional, err := CompilePattern(`%{WORD:name}?bar`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if optional.fastMatcher == nil {
+		t.Fatal("expected optional matcher")
+	}
+	if optional.fastMatcher.ir.firstLiteral != "" {
+		t.Fatalf("optional matcher firstLiteral = %q, want empty", optional.fastMatcher.ir.firstLiteral)
+	}
+	if got, want := optional.fastMatcher.ir.lastLiteral, "bar"; got != want {
+		t.Fatalf("lastLiteral = %q, want %q", got, want)
+	}
+}
+
 func BenchmarkFindStringSubmatch(b *testing.B) {
 	re := regexp.MustCompile(`(\w+):(\w+):(\w+):(\w+):(\w+):(\w+)`)
 
@@ -687,6 +717,56 @@ func TestStructuredGreedyLiteralBacktracksLikeRegexp(t *testing.T) {
 	assert.Equal(t, "pgAdmin 4 - DB:postgres", fastRet[current.nameIndex["application"]])
 	assert.Equal(t, "postgres", fastRet[current.nameIndex["user"]])
 	assert.Equal(t, "127.0.0.1", fastRet[current.nameIndex["remote_host"]])
+}
+
+func TestStructuredOptionalLiteralBoundaryMatchesRegexp(t *testing.T) {
+	pattern := `%{DATA:msg}foo?bar`
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected optional literal boundary pattern to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	for _, line := range []string{"zzzfoobar", "zzzbar"} {
+		fastRet, fastErr := current.Run(line, true)
+		regexpRet, regexpErr := regexpOnly.Run(line, true)
+		assert.Equalf(t, regexpErr, fastErr, "optional literal boundary error diverged for %q", line)
+		assert.Equalf(t, regexpRet, fastRet, "optional literal boundary result diverged for %q", line)
+	}
+}
+
+func TestStructuredParserBoundaryAcrossSpaceMatchesRegexp(t *testing.T) {
+	pattern := `%{NOTSPACE:name}%{SPACE}\]`
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected parser boundary pattern to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	for _, line := range []string{"foo]", "foo ]"} {
+		fastRet, fastErr := current.Run(line, true)
+		regexpRet, regexpErr := regexpOnly.Run(line, true)
+		assert.Equalf(t, regexpErr, fastErr, "space boundary error diverged for %q", line)
+		assert.Equalf(t, regexpRet, fastRet, "space boundary result diverged for %q", line)
+	}
 }
 
 func TestStructuredRedisFixtureUsesFastMatcher(t *testing.T) {
@@ -1697,6 +1777,43 @@ func BenchmarkRunStructuredSyslogLineRegexpPath(b *testing.B) {
 		}
 		if len(ret) == 0 {
 			b.Fatal("empty result")
+		}
+	}
+}
+
+func BenchmarkRunStructuredShortMismatch(b *testing.B) {
+	pattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	line := "x"
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		_, runErr := g.Run(line, true)
+		if runErr != ErrMismatch {
+			b.Fatalf("expected mismatch, got %v", runErr)
+		}
+	}
+}
+
+func BenchmarkRunStructuredShortMismatchRegexpPath(b *testing.B) {
+	pattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	line := "x"
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		_, runErr := g.Run(line, true)
+		if runErr != ErrMismatch {
+			b.Fatalf("expected mismatch, got %v", runErr)
 		}
 	}
 }
