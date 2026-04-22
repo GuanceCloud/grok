@@ -27,6 +27,7 @@ type GrokRegexp struct {
 	nameIndex     map[string]int
 	valueKinds    []valueKind
 	fastMatcher   *structuredMatcher
+	typedRawPool  *stringBufferPool
 }
 
 type valueKind uint8
@@ -148,6 +149,25 @@ func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any
 	if g.fastMatcher != nil && g.fastMatcher.quickReject(content, 0) {
 		return nil, ErrMismatch
 	}
+
+	if g.fastMatcher != nil && g.typedRawPool != nil {
+		buf := g.typedRawPool.get()
+		raw, err := g.runTo(content, trimSpace, buf.Values)
+		if err != nil {
+			g.typedRawPool.put(buf)
+			return nil, err
+		}
+
+		castDst := ensureAnyBuffer(dst, len(g.subMatchNames.name))
+		for i := range g.subMatchNames.name {
+			castDst[i], _ = castValue(raw[i], g.valueKinds[i])
+		}
+
+		buf.Values = raw
+		g.typedRawPool.put(buf)
+		return castDst, nil
+	}
+
 	match, err := g.matchIndexes(content)
 	if err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ These numbers compare the current structured fast path with the same patterns fo
 - Command:
   - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
   - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^(BenchmarkRunWithTypeInfo(|To|WithPoolParallel|WithPoolHelperParallel|StructuredCommon(|RegexpPath)))$' -benchmem -benchtime=300ms`
   - `go test -run '^$' -bench '^BenchmarkCommonComposedPatterns/(go_|java_|python_|node_|zap_|logrus_|k8s_)' -benchmem -benchtime=300ms`
 
 ## Summary
@@ -68,6 +69,17 @@ These are small focused checks for common upstream grok layouts outside the Data
 | Structured SYSLOG line | 171.4 | 4693.0 | 27.4x | 48/113 | 1/2 |
 | Structured short mismatch | 2.688 | 4.682 | 1.7x | 0/0 | 0/0 |
 
+## Typed Extraction Benchmarks
+
+These matter directly for `pipeline-go`, which calls `RunWithTypeInfo` whenever the grok pattern declares field types.
+
+| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RunWithTypeInfo simple typed line | 111.8 | 197.6 | 1.8x | 56/120 | 2/3 |
+| RunWithTypeInfo structured typed line | 320.2 | 663.2 | 2.1x | 336/257 | 6/6 |
+| RunWithTypeInfoTo simple typed line | 93.85 | n/a | n/a | 8/n/a | 1/n/a |
+| RunWithTypeInfo pooled parallel | 17.50 | n/a | n/a | 8/n/a | 1/n/a |
+
 ## Common Application Composed Patterns
 
 These are custom, user-style composed patterns meant to reflect common application log formats rather than Datakit defaults.
@@ -96,6 +108,7 @@ These are custom, user-style composed patterns meant to reflect common applicati
 - Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
 - Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
 - `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
+- `RunWithTypeInfo` now also reuses the structured fast path when one exists, which is directly relevant to `pipeline-go` because that project switches to typed extraction as soon as a grok field is declared with `:int`, `:float`, `:bool`, or `:string`
 - The same generic machinery also carries over to common user-composed application logs; the current synthetic set spans Go, Java, Python, Node.js, Zap, Logrus, and controller-runtime without adding language-specific hard-coded matchers
 - That broader set currently ranges from near parity on `controller-runtime` style reconcile logs up to about `69x` on access-style Python logs, which matches the underlying rule of thumb: fixed delimiters and stable field order benefit the most
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`

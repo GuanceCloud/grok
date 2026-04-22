@@ -347,17 +347,26 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	}
 
 	valueKinds := make([]valueKind, len(meta.subMatchNames.name))
+	hasTypedValue := false
 	for i, name := range meta.subMatchNames.name {
 		switch gP.varbType[name] {
 		case GTypeInt:
 			valueKinds[i] = valueKindInt
+			hasTypedValue = true
 		case GTypeFloat:
 			valueKinds[i] = valueKindFloat
+			hasTypedValue = true
 		case GTypeBool:
 			valueKinds[i] = valueKindBool
+			hasTypedValue = true
 		default:
 			valueKinds[i] = valueKindRaw
 		}
+	}
+
+	var typedRawPool *stringBufferPool
+	if hasTypedValue {
+		typedRawPool = newStringBufferPool(len(meta.subMatchNames.name))
 	}
 
 	return &GrokRegexp{
@@ -367,6 +376,7 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 		nameIndex:     meta.nameIndex,
 		valueKinds:    valueKinds,
 		fastMatcher:   buildFastMatcher(gP, storage, meta),
+		typedRawPool:  typedRawPool,
 	}, nil
 }
 

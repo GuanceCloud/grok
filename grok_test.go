@@ -227,6 +227,31 @@ true 1.1`,
 	}
 }
 
+func TestRunWithTypeInfoStructuredFastPathMatchesRegexp(t *testing.T) {
+	pattern := `time=%{TIMESTAMP_ISO8601:time} status=%{INT:status:int} duration=%{NUMBER:duration:float} ok=%{WORD:ok:bool} bytes=%{INT:bytes:int} msg="%{GREEDYDATA:msg}"`
+	line := `time=2026-04-22T10:11:12.123+08:00 status=200 duration=12.4 ok=true bytes=532 msg="request completed"`
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected typed pattern to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	fastRet, fastErr := current.RunWithTypeInfo(line, true)
+	regexpRet, regexpErr := regexpOnly.RunWithTypeInfo(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, []any{"2026-04-22T10:11:12.123+08:00", int64(200), float64(12.4), true, int64(532), "request completed"}, fastRet)
+}
+
 func TestCommonApacheLogRawRequest(t *testing.T) {
 	g, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -1353,6 +1378,68 @@ func BenchmarkRunWithTypeInfo(b *testing.B) {
 			b.Fatal(err)
 		}
 		if len(ret) != 3 {
+			b.Fatal(ret)
+		}
+	}
+}
+
+func BenchmarkRunWithTypeInfoRegexpPath(b *testing.B) {
+	g, err := CompilePattern("%{INT:A:int} %{WORD:B:bool} %{BASE10NUM:C:float}", PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	line := "1 true 1.1"
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, err := g.RunWithTypeInfo(line, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(ret) != 3 {
+			b.Fatal(ret)
+		}
+	}
+}
+
+func BenchmarkRunWithTypeInfoStructuredCommon(b *testing.B) {
+	g, err := CompilePattern(`time=%{TIMESTAMP_ISO8601:time} status=%{INT:status:int} duration=%{NUMBER:duration:float} ok=%{WORD:ok:bool} bytes=%{INT:bytes:int} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	line := `time=2026-04-22T10:11:12.123+08:00 status=200 duration=12.4 ok=true bytes=532 msg="request completed"`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, err := g.RunWithTypeInfo(line, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(ret) != 6 {
+			b.Fatal(ret)
+		}
+	}
+}
+
+func BenchmarkRunWithTypeInfoStructuredCommonRegexpPath(b *testing.B) {
+	g, err := CompilePattern(`time=%{TIMESTAMP_ISO8601:time} status=%{INT:status:int} duration=%{NUMBER:duration:float} ok=%{WORD:ok:bool} bytes=%{INT:bytes:int} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	line := `time=2026-04-22T10:11:12.123+08:00 status=200 duration=12.4 ok=true bytes=532 msg="request completed"`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, err := g.RunWithTypeInfo(line, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(ret) != 6 {
 			b.Fatal(ret)
 		}
 	}
