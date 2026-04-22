@@ -1,14 +1,18 @@
 package grok
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 type structuredMatcher struct {
-	steps        []structuredStep
-	ir           structuredIRInfo
-	writes       bool
-	backtracking bool
-	changeLog    bool
-	changeCap    int
+	steps         []structuredStep
+	ir            structuredIRInfo
+	anchoredStart bool
+	writes        bool
+	backtracking  bool
+	changeLog     bool
+	changeCap     int
 }
 
 type matchChange struct {
@@ -68,6 +72,7 @@ const (
 	structuredWord structuredKind = iota
 	structuredNotSpace
 	structuredHostName
+	structuredIPOrHost
 	structuredNumber
 	structuredCharClass
 	structuredMonthName
@@ -85,6 +90,8 @@ const (
 	structuredSpacePlus
 	structuredSpaceStar
 	structuredTimestampISO8601
+	structuredURIPath
+	structuredURIPathParam
 	structuredHTTPDate
 	structuredLogLevel
 )
@@ -108,14 +115,19 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	}
 
 	matcher := structuredMatcher{
-		steps:        steps,
-		ir:           buildStructuredMatcherIR(steps),
-		writes:       matcherWrites(steps),
-		backtracking: matcherNeedsBacktracking(steps),
-		changeLog:    matcherNeedsChangeLog(steps),
-		changeCap:    matcherChangeCapacity(steps),
+		steps:         steps,
+		ir:            buildStructuredMatcherIR(steps),
+		anchoredStart: patternHasStartAnchor(pattern),
+		writes:        matcherWrites(steps),
+		backtracking:  matcherNeedsBacktracking(steps),
+		changeLog:     matcherNeedsChangeLog(steps),
+		changeCap:     matcherChangeCapacity(steps),
 	}
 	return &matcher
+}
+
+func patternHasStartAnchor(pattern string) bool {
+	return strings.HasPrefix(pattern, "^")
 }
 
 func configureStructuredSteps(steps []structuredStep) {
@@ -921,8 +933,14 @@ func structuredPrimitiveKind(syntax string) (structuredKind, bool) {
 		return structuredWord, true
 	case "HOSTNAME", "HOST":
 		return structuredHostName, true
-	case "NOTSPACE", "USER", "USERNAME", "IPORHOST", "IP", "URIHOST", "PATH", "URIPATH", "URIPATHPARAM":
+	case "IPORHOST", "IP", "URIHOST":
+		return structuredIPOrHost, true
+	case "NOTSPACE", "USER", "USERNAME", "PATH":
 		return structuredNotSpace, true
+	case "URIPATH":
+		return structuredURIPath, true
+	case "URIPATHPARAM":
+		return structuredURIPathParam, true
 	case "EMAILLOCALPART":
 		return structuredNotSpace, true
 	case "INT", "NUMBER", "BASE10NUM", "POSINT", "NONNEGINT":
@@ -1250,11 +1268,44 @@ func firstStructuredLiteral(step structuredStep) (string, bool) {
 }
 
 func (m structuredMatcher) match(dst []string, content string, trimSpace bool) bool {
-	if m.quickReject(content, 0) {
+	if m.anchoredStart || m.prefersStartOnly() {
+		return m.matchTopAt(dst, content, 0, trimSpace)
+	}
+	return m.matchSearch(dst, content, trimSpace)
+}
+
+func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
+	if m.anchoredStart || m.prefersStartOnly() {
+		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
+	}
+	return m.matchTypedSearch(dst, content, trimSpace, kinds)
+}
+
+func (m structuredMatcher) prefersStartOnly() bool {
+	if len(m.steps) == 0 {
+		return true
+	}
+	step := m.steps[0]
+	if step.optional {
+		return false
+	}
+	if step.parser == nil {
+		return false
+	}
+	switch step.parser.kind {
+	case structuredUntilLiteral, structuredGreedyUntilLiteral, structuredSpaceStar:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, trimSpace bool) bool {
+	if m.quickReject(content, pos) {
 		return false
 	}
 	if !m.backtracking && !m.changeLog {
-		next, ok := m.matchLinearFrom(dst, content, 0, trimSpace)
+		next, ok := m.matchLinearFrom(dst, content, pos, trimSpace)
 		return ok && next >= 0
 	}
 
@@ -1271,19 +1322,19 @@ func (m structuredMatcher) match(dst []string, content string, trimSpace bool) b
 	var next int
 	var ok bool
 	if m.backtracking {
-		next, ok, _ = m.matchBacktrackingFrom(dst, content, 0, trimSpace, changes)
+		next, ok, _ = m.matchBacktrackingFrom(dst, content, pos, trimSpace, changes)
 	} else {
-		next, ok, _ = m.matchFrom(dst, content, 0, trimSpace, changes)
+		next, ok, _ = m.matchFrom(dst, content, pos, trimSpace, changes)
 	}
 	return ok && next >= 0
 }
 
-func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
-	if m.quickReject(content, 0) {
+func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) bool {
+	if m.quickReject(content, pos) {
 		return false
 	}
 	if !m.backtracking && !m.changeLog {
-		next, ok := m.matchTypedLinearFrom(dst, content, 0, trimSpace, kinds)
+		next, ok := m.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
 		return ok && next >= 0
 	}
 
@@ -1300,11 +1351,83 @@ func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool,
 	var next int
 	var ok bool
 	if m.backtracking {
-		next, ok, _ = m.matchTypedBacktrackingFrom(dst, content, 0, trimSpace, kinds, changes)
+		next, ok, _ = m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
 	} else {
-		next, ok, _ = m.matchTypedFrom(dst, content, 0, trimSpace, kinds, changes)
+		next, ok, _ = m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
 	}
 	return ok && next >= 0
+}
+
+func (m structuredMatcher) matchSearch(dst []string, content string, trimSpace bool) bool {
+	for pos := m.nextSearchPos(content, 0); pos <= len(content); pos = m.nextSearchPos(content, pos+1) {
+		resetStringResults(dst)
+		if m.matchTopAt(dst, content, pos, trimSpace) {
+			return true
+		}
+		if len(content)-pos < m.ir.minWidth {
+			break
+		}
+	}
+	return false
+}
+
+func (m structuredMatcher) matchTypedSearch(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
+	for pos := m.nextSearchPos(content, 0); pos <= len(content); pos = m.nextSearchPos(content, pos+1) {
+		resetAnyResults(dst)
+		if m.matchTypedTopAt(dst, content, pos, trimSpace, kinds) {
+			return true
+		}
+		if len(content)-pos < m.ir.minWidth {
+			break
+		}
+	}
+	return false
+}
+
+func (m structuredMatcher) nextSearchPos(content string, pos int) int {
+	if pos <= 0 {
+		if m.ir.firstLiteralExact && m.ir.firstLiteral != "" {
+			idx := strings.Index(content, m.ir.firstLiteral)
+			if idx < 0 {
+				return len(content) + 1
+			}
+			return idx
+		}
+		return 0
+	}
+	if pos > len(content) {
+		return len(content) + 1
+	}
+	if m.ir.firstLiteralExact && m.ir.firstLiteral != "" {
+		idx := strings.Index(content[pos:], m.ir.firstLiteral)
+		if idx < 0 {
+			return len(content) + 1
+		}
+		return pos + idx
+	}
+	if pos == len(content) {
+		return pos
+	}
+	if content[pos] < utf8.RuneSelf {
+		return pos
+	}
+	_, size := utf8.DecodeRuneInString(content[pos:])
+	if size <= 0 {
+		return pos
+	}
+	return pos
+}
+
+func resetStringResults(dst []string) {
+	for i := range dst {
+		dst[i] = ""
+	}
+}
+
+func resetAnyResults(dst []any) {
+	for i := range dst {
+		dst[i] = nil
+	}
 }
 
 func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
@@ -2031,6 +2154,10 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 		if !isApacheWord(segment) {
 			return 0, "", false
 		}
+	case structuredIPOrHost, structuredURIPath, structuredURIPathParam:
+		if segment == "" {
+			return 0, "", false
+		}
 	case structuredHostName:
 		if segment == "" {
 			return 0, "", false
@@ -2096,11 +2223,11 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredSpacePlus:
-		if segment == "" || !isOnlySpace(segment) {
+		if segment == "" || !isOnlyRegexpSpace(segment) {
 			return 0, "", false
 		}
 	case structuredSpaceStar:
-		if !isOnlySpace(segment) {
+		if !isOnlyRegexpSpace(segment) {
 			return 0, "", false
 		}
 	case structuredTimestampISO8601:
@@ -2126,7 +2253,7 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 	switch p.kind {
 	case structuredSpacePlus, structuredSpaceStar:
 		i := pos
-		for i < len(content) && isASCIISpace(content[i]) {
+		for i < len(content) && isRegexpASCIISpace(content[i]) {
 			i++
 		}
 		if p.kind == structuredSpacePlus && i == pos {
@@ -2141,6 +2268,12 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			return sliceWord(content, pos)
 		case structuredHostName:
 			return sliceHostName(content, pos)
+		case structuredIPOrHost:
+			return sliceIPOrHost(content, pos)
+		case structuredURIPath:
+			return sliceURIPath(content, pos)
+		case structuredURIPathParam:
+			return sliceURIPathParam(content, pos)
 		case structuredCharClass:
 			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredNotSpace:
@@ -2159,6 +2292,8 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			return sliceQuoted(content, pos)
 		case structuredTimestampISO8601:
 			return sliceTimestampISO8601(content, pos)
+		case structuredHTTPDate:
+			return sliceHTTPDate(content, pos)
 		case structuredLogLevel:
 			return sliceLogLevelWithContext(content, pos, p.nextParser, p.nextLiteral)
 		}
@@ -2166,10 +2301,26 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 
 	if p.nextLiteral != "" {
 		switch p.kind {
+		case structuredUntilLiteral:
+			if (p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
+			}
+		case structuredGreedyUntilLiteral:
+			if (p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
+			}
 		case structuredTimestampISO8601:
 			return sliceTimestampISO8601(content, pos)
+		case structuredHTTPDate:
+			return sliceHTTPDate(content, pos)
 		case structuredHostName:
 			return sliceHostName(content, pos)
+		case structuredIPOrHost:
+			return sliceIPOrHost(content, pos)
+		case structuredURIPath:
+			return sliceURIPath(content, pos)
+		case structuredURIPathParam:
+			return sliceURIPathParam(content, pos)
 		case structuredMonthName, structuredDayName:
 			return sliceAlphaToken(content, pos)
 		case structuredTimeOfDay:
@@ -2198,6 +2349,12 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		return sliceWord(content, pos)
 	case structuredHostName:
 		return sliceHostName(content, pos)
+	case structuredIPOrHost:
+		return sliceIPOrHost(content, pos)
+	case structuredURIPath:
+		return sliceURIPath(content, pos)
+	case structuredURIPathParam:
+		return sliceURIPathParam(content, pos)
 	case structuredCharClass:
 		return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 	case structuredNotSpace:
@@ -2216,8 +2373,12 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		return sliceQuoted(content, pos)
 	case structuredTimestampISO8601:
 		return sliceTimestampISO8601(content, pos)
+	case structuredHTTPDate:
+		return sliceHTTPDate(content, pos)
 	case structuredLogLevel:
 		return sliceLogLevel(content, pos)
+	case structuredUntilLiteral, structuredGreedyUntilLiteral:
+		return sliceDotRun(content, pos, p.allowEmpty)
 	}
 
 	return content[pos:], len(content), true
@@ -2225,7 +2386,7 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 
 func canParserEndWithoutLiteral(kind structuredKind) bool {
 	switch kind {
-	case structuredWord, structuredHostName, structuredCharClass, structuredNotSpace, structuredNumber, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredLogLevel:
+	case structuredWord, structuredHostName, structuredIPOrHost, structuredURIPath, structuredURIPathParam, structuredCharClass, structuredNotSpace, structuredNumber, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredHTTPDate, structuredLogLevel:
 		return true
 	default:
 		return false
@@ -2241,6 +2402,37 @@ func sliceWord(content string, pos int) (string, int, bool) {
 		return "", 0, false
 	}
 	return content[start:pos], pos, true
+}
+
+func sliceURIPath(content string, pos int) (string, int, bool) {
+	if pos >= len(content) || content[pos] != '/' {
+		return "", 0, false
+	}
+	i := pos + 1
+	for i < len(content) {
+		c := content[i]
+		if isURIPathChar(c) {
+			i++
+			continue
+		}
+		break
+	}
+	return content[pos:i], i, true
+}
+
+func sliceURIPathParam(content string, pos int) (string, int, bool) {
+	_, next, ok := sliceURIPath(content, pos)
+	if !ok {
+		return "", 0, false
+	}
+	i := next
+	if i < len(content) && content[i] == '?' {
+		i++
+		for i < len(content) && isURIParamChar(content[i]) {
+			i++
+		}
+	}
+	return content[pos:i], i, true
 }
 
 func isHostnameStartByte(b byte) bool {
@@ -2281,11 +2473,25 @@ func sliceHostName(content string, pos int) (string, int, bool) {
 	if pos >= len(content) || !isHostnameStartByte(content[pos]) {
 		return "", 0, false
 	}
-	pos++
-	for pos < len(content) && isHostnameByte(content[pos]) {
+	for {
+		for pos < len(content) && (isHostnameStartByte(content[pos]) || content[pos] == '-') {
+			pos++
+		}
+		if pos >= len(content) || content[pos] != '.' {
+			return content[start:pos], pos, true
+		}
+		if pos+1 >= len(content) || !isHostnameStartByte(content[pos+1]) {
+			return content[start : pos+1], pos + 1, true
+		}
 		pos++
 	}
-	return content[start:pos], pos, true
+}
+
+func sliceIPOrHost(content string, pos int) (string, int, bool) {
+	if seg, next, ok := sliceIPv6Like(content, pos); ok {
+		return seg, next, true
+	}
+	return sliceHostName(content, pos)
 }
 
 func sliceNotSpaceWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
@@ -2357,6 +2563,14 @@ func sliceTimestampISO8601(content string, pos int) (string, int, bool) {
 	return content[pos:next], next, true
 }
 
+func sliceHTTPDate(content string, pos int) (string, int, bool) {
+	next, ok := consumeHTTPDate(content, pos)
+	if !ok || next == pos {
+		return "", 0, false
+	}
+	return content[pos:next], next, true
+}
+
 func sliceLogLevel(content string, pos int) (string, int, bool) {
 	start := pos
 	for pos < len(content) {
@@ -2397,24 +2611,46 @@ func sliceTokenBeforeSpaceOrLiteral(content string, pos int, nextLiteral string)
 		return "", 0, false
 	}
 
+	searchEnd := len(content)
+	for {
+		rel := lastLiteralIndex(content[pos:searchEnd], nextLiteral)
+		if rel < 0 {
+			return "", 0, false
+		}
+		litPos := pos + rel
+		tokenEnd := litPos
+		for tokenEnd > pos && isRegexpASCIISpace(content[tokenEnd-1]) {
+			tokenEnd--
+		}
+		if tokenEnd > pos && isOnlyRegexpSpace(content[tokenEnd:litPos]) {
+			return content[pos:tokenEnd], tokenEnd, true
+		}
+		searchEnd = litPos
+	}
+}
+
+func sliceUntilSpaceOrLiteral(content string, pos int, nextLiteral string) (string, int, bool) {
+	if nextLiteral == "" || pos > len(content) {
+		return "", 0, false
+	}
+
 	first := nextLiteral[0]
 	for i := pos; i < len(content); i++ {
 		c := content[i]
 		if c == first && strings.HasPrefix(content[i:], nextLiteral) {
-			return content[pos:i], i, i > pos
+			return content[pos:i], i, true
 		}
-		if !isASCIISpace(c) {
+		if !isRegexpASCIISpace(c) {
 			continue
 		}
 
 		j := i
-		for j < len(content) && isASCIISpace(content[j]) {
+		for j < len(content) && isRegexpASCIISpace(content[j]) {
 			j++
 		}
 		if strings.HasPrefix(content[j:], nextLiteral) {
-			return content[pos:i], i, i > pos
+			return content[pos:i], i, true
 		}
-		return "", 0, false
 	}
 	return "", 0, false
 }
@@ -2510,13 +2746,90 @@ func sliceDigitsAndPunct(content string, pos int) (string, int, bool) {
 	return content[start:pos], pos, true
 }
 
-func isOnlySpace(s string) bool {
+func sliceDotRun(content string, pos int, allowEmpty bool) (string, int, bool) {
+	start := pos
+	for pos < len(content) && content[pos] != '\n' {
+		pos++
+	}
+	if !allowEmpty && pos == start {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceIPv6Like(content string, pos int) (string, int, bool) {
+	start := pos
+	colons := 0
+	for pos < len(content) {
+		c := content[pos]
+		switch {
+		case c >= '0' && c <= '9':
+			pos++
+		case c >= 'A' && c <= 'F':
+			pos++
+		case c >= 'a' && c <= 'f':
+			pos++
+		case c == ':' || c == '.':
+			if c == ':' {
+				colons++
+			}
+			pos++
+		default:
+			goto done
+		}
+	}
+done:
+	if pos == start || colons == 0 {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
+}
+
+func isURIPathChar(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= 'a' && c <= 'z':
+		return true
+	case c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '/', '$', '.', '+', '!', '*', '\'', '(', ')', '{', '}', ',', '~', ':', ';', '=', '@', '#', '%', '_', '-':
+		return true
+	default:
+		return false
+	}
+}
+
+func isURIParamChar(c byte) bool {
+	if isURIPathChar(c) {
+		return true
+	}
+	switch c {
+	case '?', '&', '|', '[', ']', '<', '>':
+		return true
+	default:
+		return false
+	}
+}
+
+func isOnlyRegexpSpace(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if !isASCIISpace(s[i]) {
+		if !isRegexpASCIISpace(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func isRegexpASCIISpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\f':
+		return true
+	default:
+		return false
+	}
 }
 
 func isYearValue(s string) bool {
@@ -2548,7 +2861,7 @@ func isSecondValue(s string) bool {
 		return false
 	}
 	main := s
-	if idx := strings.IndexAny(s, ".,"); idx >= 0 {
+	if idx := strings.IndexAny(s, ".,:"); idx >= 0 {
 		main = s[:idx]
 		if idx == len(s)-1 {
 			return false
@@ -2578,27 +2891,8 @@ func parsePositiveInt(s string) (int, bool) {
 }
 
 func looksLikeTimestampISO8601(s string) bool {
-	if len(s) < 16 {
-		return false
-	}
-	hasDateSep := false
-	hasTimeSep := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9':
-		case c == '-' || c == '/' || c == 'T' || c == ':' || c == '.' || c == ',' || c == '+' || c == 'Z' || c == 'z' || c == ' ':
-			if c == '-' || c == '/' {
-				hasDateSep = true
-			}
-			if c == ':' {
-				hasTimeSep = true
-			}
-		default:
-			return false
-		}
-	}
-	return hasDateSep && hasTimeSep
+	next, ok := consumeTimestampISO8601(s, 0)
+	return ok && next == len(s)
 }
 
 func looksLikeTimeOfDay(s string) bool {
@@ -2607,10 +2901,8 @@ func looksLikeTimeOfDay(s string) bool {
 }
 
 func looksLikeHTTPDate(s string) bool {
-	if len(s) < 20 {
-		return false
-	}
-	return strings.Count(s, "/") >= 2 && strings.Count(s, ":") >= 2
+	next, ok := consumeHTTPDate(s, 0)
+	return ok && next == len(s)
 }
 
 func isLogLevel(s string) bool {

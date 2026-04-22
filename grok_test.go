@@ -75,6 +75,111 @@ func TestStructuredIRMetadata(t *testing.T) {
 	}
 }
 
+func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
+	g, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected structured matcher")
+	}
+
+	regexpOnly, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `  prefix level=INFO msg="中文 message" suffix`
+	fastRet, fastErr := g.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredAnchoredPatternKeepsStartSemantics(t *testing.T) {
+	g, err := CompilePattern(`^level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected structured matcher")
+	}
+
+	regexpOnly, err := CompilePattern(`^level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `prefix level=INFO msg="anchored"`
+	_, fastErr := g.Run(line, true)
+	_, regexpErr := regexpOnly.Run(line, true)
+	assert.ErrorIs(t, fastErr, ErrMismatch)
+	assert.ErrorIs(t, regexpErr, ErrMismatch)
+}
+
+func TestStructuredTimestampAndHTTPDateMatchRegexpOnMalformedInput(t *testing.T) {
+	timestampPattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:level}\] \[%{NOTSPACE:thread}\] %{NOTSPACE:logger} - %{GREEDYDATA:msg}`
+	timestampLine := `0000-0-0 0000:0+0 [WAR] [0] 0 - `
+
+	current, err := CompilePattern(timestampPattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly, err := CompilePattern(timestampPattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+	_, fastErr := current.Run(timestampLine, false)
+	_, regexpErr := regexpOnly.Run(timestampLine, false)
+	assert.ErrorIs(t, fastErr, ErrMismatch)
+	assert.ErrorIs(t, regexpErr, ErrMismatch)
+
+	httpPattern := `%{IPORHOST:client} - - \[%{HTTPDATE:time}\] "%{WORD:method} %{URIPATHPARAM:path} HTTP/%{NUMBER:http_version}" %{INT:status} %{INT:bytes} "%{GREEDYDATA:referrer}" "%{GREEDYDATA:agent}"`
+	httpLine := `0 - - [//000000:00:00000000] "0 0 HTTP/0" 0 0 "" ""`
+	current, err = CompilePattern(httpPattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly, err = CompilePattern(httpPattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+	_, fastErr = current.Run(httpLine, false)
+	_, regexpErr = regexpOnly.Run(httpLine, false)
+	assert.ErrorIs(t, fastErr, ErrMismatch)
+	assert.ErrorIs(t, regexpErr, ErrMismatch)
+}
+
+func TestStructuredGreedyDataStopsAtNewlineLikeRegexp(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["date"] = `%{YEAR}-%{MONTHNUM}-%{MONTHDAY} %{TIME}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+
+	pattern := `%{date:time}\[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
+	line := "00-1-1 0:00:00[INFO] 0\n"
+	current, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	fastRet, fastErr := current.Run(line, false)
+	regexpRet, regexpErr := regexpOnly.Run(line, false)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
 func BenchmarkFindStringSubmatch(b *testing.B) {
 	re := regexp.MustCompile(`(\w+):(\w+):(\w+):(\w+):(\w+):(\w+)`)
 

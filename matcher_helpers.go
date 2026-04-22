@@ -7,28 +7,28 @@ import (
 )
 
 var monthNameValues = [...]string{
-	"jan", "january", "januar",
-	"feb", "february", "februar",
-	"mr", "mar", "mär", "mrch", "march", "mrz", "märz",
-	"apr", "april",
-	"ma", "may", "mai",
-	"jun", "june", "juni",
-	"jul", "july",
-	"aug", "august",
-	"sep", "september",
-	"ot", "oct", "okt", "october",
-	"nov", "november",
-	"dec", "dez", "december", "dezember",
+	"Jan", "January", "Januar",
+	"Feb", "February", "Februar",
+	"Mr", "Mar", "Mär", "Mrch", "March", "Mrz", "März",
+	"Apr", "April",
+	"Ma", "May", "Mai",
+	"Jun", "June", "Juni",
+	"Jul", "July",
+	"Aug", "August",
+	"Sep", "September",
+	"Ot", "Oct", "Okt", "October",
+	"Nov", "November",
+	"Dec", "Dez", "December", "Dezember",
 }
 
 var dayNameValues = [...]string{
-	"mon", "monday",
-	"tue", "tuesday",
-	"wed", "wednesday",
-	"thu", "thursday",
-	"fri", "friday",
-	"sat", "saturday",
-	"sun", "sunday",
+	"Mon", "Monday",
+	"Tue", "Tuesday",
+	"Wed", "Wednesday",
+	"Thu", "Thursday",
+	"Fri", "Friday",
+	"Sat", "Saturday",
+	"Sun", "Sunday",
 }
 
 var logLevelValues = [...]string{
@@ -87,79 +87,114 @@ func maybeTrim(s string, trim bool) string {
 
 func consumeTimestampISO8601(s string, start int) (int, bool) {
 	i := start
-	if !consumeNDigits(s, &i, 4) || i >= len(s) || s[i] != '-' {
+	yearStart := i
+	if !consumeOneOrTwoYearChunks(s, &i) || i >= len(s) || s[i] != '-' {
 		return 0, false
 	}
 	i++
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || s[i] != '-' {
+	if !consumeTwoDigitRange(s, &i, 1, 12, true) || i >= len(s) || s[i] != '-' {
 		return 0, false
 	}
 	i++
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || (s[i] != 'T' && s[i] != ' ') {
+	if !consumeTwoDigitRange(s, &i, 1, 31, true) || i >= len(s) || (s[i] != 'T' && s[i] != ' ') {
 		return 0, false
 	}
 	i++
-	if !consumeOneOrTwoDigits(s, &i) {
+	if !consumeTwoDigitRange(s, &i, 0, 23, true) {
 		return 0, false
 	}
 	if i < len(s) && s[i] == ':' {
 		i++
 	}
-	if !consumeNDigits(s, &i, 2) {
+	if !consumeTwoDigitRange(s, &i, 0, 59, false) {
 		return 0, false
 	}
-	if i < len(s) && s[i] == ':' {
-		i++
-		if !consumeOneOrTwoDigits(s, &i) {
-			return 0, false
-		}
-		if i < len(s) && (s[i] == '.' || s[i] == ',') {
+	if i < len(s) && (s[i] == ':' || isASCIIDigit(s[i])) {
+		if s[i] == ':' {
 			i++
-			if !consumeAtLeastOneDigit(s, &i) {
-				return 0, false
-			}
+		}
+		if !consumeSecondValue(s, &i) {
+			return 0, false
 		}
 	}
 
 	if i < len(s) {
 		switch s[i] {
-		case 'Z', 'z':
+		case 'Z':
 			i++
 		case '+', '-':
 			i++
-			if !consumeOneOrTwoDigits(s, &i) {
+			if !consumeTwoDigitRange(s, &i, 0, 23, true) {
 				return 0, false
 			}
 			if i < len(s) && s[i] == ':' {
 				i++
 			}
-			_ = consumeNDigits(s, &i, 2)
+			if !consumeTwoDigitRange(s, &i, 0, 59, false) {
+				return 0, false
+			}
 		}
 	}
 
+	if i == yearStart {
+		return 0, false
+	}
+	return i, true
+}
+
+func consumeHTTPDate(s string, start int) (int, bool) {
+	i := start
+	if !consumeTwoDigitRange(s, &i, 1, 31, true) || i >= len(s) || s[i] != '/' {
+		return 0, false
+	}
+	i++
+	monthStart := i
+	for i < len(s) {
+		r := s[i]
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r >= utf8.RuneSelf {
+			i++
+			continue
+		}
+		break
+	}
+	if i == monthStart || !isMonthNameValue(s[monthStart:i]) || i >= len(s) || s[i] != '/' {
+		return 0, false
+	}
+	i++
+	if !consumeOneOrTwoYearChunks(s, &i) || i >= len(s) || s[i] != ':' {
+		return 0, false
+	}
+	i++
+	next, ok := consumeTimeOfDay(s, i)
+	if !ok {
+		return 0, false
+	}
+	i = next
+	if i >= len(s) || s[i] != ' ' {
+		return 0, false
+	}
+	i++
+	if !consumeSignedInt(s, &i) {
+		return 0, false
+	}
 	return i, true
 }
 
 func consumeTimeOfDay(s string, start int) (int, bool) {
 	i := start
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || s[i] != ':' {
+	if !consumeTwoDigitRange(s, &i, 0, 23, true) || i >= len(s) || s[i] != ':' {
 		return 0, false
 	}
 	i++
-	if !consumeNDigits(s, &i, 2) {
+	if !consumeTwoDigitRange(s, &i, 0, 59, false) {
 		return 0, false
 	}
-	if i < len(s) && s[i] == ':' {
-		i++
-		if !consumeOneOrTwoDigits(s, &i) {
-			return 0, false
-		}
-		if i < len(s) && (s[i] == '.' || s[i] == ',') {
-			i++
-			if !consumeAtLeastOneDigit(s, &i) {
-				return 0, false
-			}
-		}
+	if i >= len(s) || s[i] != ':' {
+		return 0, false
+	}
+	i++
+	if !consumeSecondValue(s, &i) {
+		return 0, false
 	}
 	return i, true
 }
@@ -212,6 +247,66 @@ func consumeAtLeastOneDigit(s string, i *int) bool {
 	return *i > start
 }
 
+func consumeOneOrTwoYearChunks(s string, i *int) bool {
+	start := *i
+	if !consumeNDigits(s, i, 2) {
+		return false
+	}
+	if *i+2 <= len(s) {
+		allDigits := true
+		for j := *i; j < *i+2; j++ {
+			if s[j] < '0' || s[j] > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			*i += 2
+		}
+	}
+	return *i == start+2 || *i == start+4
+}
+
+func consumeTwoDigitRange(s string, i *int, min int, max int, allowSingle bool) bool {
+	start := *i
+	if allowSingle {
+		if !consumeOneOrTwoDigits(s, i) {
+			return false
+		}
+	} else {
+		if !consumeNDigits(s, i, 2) {
+			return false
+		}
+	}
+	v, ok := parsePositiveInt(s[start:*i])
+	return ok && v >= min && v <= max
+}
+
+func consumeSecondValue(s string, i *int) bool {
+	start := *i
+	if !consumeOneOrTwoDigits(s, i) {
+		return false
+	}
+	v, ok := parsePositiveInt(s[start:*i])
+	if !ok || v < 0 || v > 60 {
+		return false
+	}
+	if *i < len(s) && (s[*i] == '.' || s[*i] == ',' || s[*i] == ':') {
+		*i++
+		if !consumeAtLeastOneDigit(s, i) {
+			return false
+		}
+	}
+	return true
+}
+
+func consumeSignedInt(s string, i *int) bool {
+	if *i < len(s) && (s[*i] == '+' || s[*i] == '-') {
+		*i++
+	}
+	return consumeAtLeastOneDigit(s, i)
+}
+
 func isASCIIDigit(b byte) bool {
 	return b >= '0' && b <= '9'
 }
@@ -236,7 +331,7 @@ func sliceAlphaToken(content string, pos int) (string, int, bool) {
 
 func isMonthNameValue(s string) bool {
 	for _, candidate := range monthNameValues {
-		if equalFoldLiteral(s, candidate) {
+		if s == candidate {
 			return true
 		}
 	}
@@ -245,7 +340,7 @@ func isMonthNameValue(s string) bool {
 
 func isDayNameValue(s string) bool {
 	for _, candidate := range dayNameValues {
-		if equalFoldLiteral(s, candidate) {
+		if s == candidate {
 			return true
 		}
 	}

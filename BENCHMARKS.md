@@ -8,6 +8,7 @@ These numbers compare the current structured fast path with the same patterns fo
 - OS/Arch: `linux/amd64`
 - CPU: `AMD Ryzen 7 9700X 8-Core Processor`
 - Command:
+  - `go test -run '^(TestDatakitFixturesMatchRegexp|TestDatakitFixturesMutationParity|TestCommonComposedPatternsMatchRegexp|TestCommonComposedPatternsMutationParity|TestTypedPatternsMutationParity|TestRunWithTypeInfoStructuredFastPathMatchesRegexp)$' -count=1 ./...`
   - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
   - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
   - `go test -run '^$' -bench '^(BenchmarkRunWithTypeInfo(|To|WithPoolParallel|WithPoolHelperParallel|StructuredCommon(|RegexpPath)))$' -benchmem -benchtime=300ms`
@@ -109,6 +110,7 @@ These are custom, user-style composed patterns meant to reflect common applicati
 - Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
 - Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
 - `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
+- Besides the fixture-level parity tests, the suite now includes deterministic mutation parity coverage for Datakit patterns, common user-composed patterns, and typed `pipeline-go` style patterns. These cases came from fuzzing and are kept as stable CI-friendly regressions.
 - `RunWithTypeInfo` now uses a typed structured fast path when one exists, rather than first materializing raw strings and then casting them; this is directly relevant to `pipeline-go` because that project switches to typed extraction as soon as a grok field is declared with `:int`, `:float`, `:bool`, or `:string`
 - On a `pipeline-go` style typed access-log pattern, that typed fast path cuts runtime from about `24.2us` to `414ns` while also reaching allocation parity with regexp
 - The same generic machinery also carries over to common user-composed application logs; the current synthetic set spans Go, Java, Python, Node.js, Zap, Logrus, and controller-runtime without adding language-specific hard-coded matchers
