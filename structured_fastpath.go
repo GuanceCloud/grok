@@ -16,6 +16,11 @@ type matchChange struct {
 	prev string
 }
 
+type typedMatchChange struct {
+	idx  int
+	prev any
+}
+
 type structuredStep struct {
 	literal               string
 	parser                *structuredParser
@@ -1236,6 +1241,35 @@ func (m structuredMatcher) match(dst []string, content string, trimSpace bool) b
 	return ok && next >= 0
 }
 
+func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
+	if m.quickReject(content, 0) {
+		return false
+	}
+	if !m.backtracking && !m.changeLog {
+		next, ok := m.matchTypedLinearFrom(dst, content, 0, trimSpace, kinds)
+		return ok && next >= 0
+	}
+
+	var smallChanges [8]typedMatchChange
+	changes := smallChanges[:0]
+	changeCap := len(dst)
+	if m.changeCap > changeCap {
+		changeCap = m.changeCap
+	}
+	if changeCap > len(smallChanges) {
+		changes = make([]typedMatchChange, 0, changeCap)
+	}
+
+	var next int
+	var ok bool
+	if m.backtracking {
+		next, ok, _ = m.matchTypedBacktrackingFrom(dst, content, 0, trimSpace, kinds, changes)
+	} else {
+		next, ok, _ = m.matchTypedFrom(dst, content, 0, trimSpace, kinds, changes)
+	}
+	return ok && next >= 0
+}
+
 func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	if m.quickReject(content, pos) {
 		return 0, false, changes
@@ -1310,6 +1344,89 @@ func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int
 				if ok {
 					if step.captureIndex >= 0 {
 						dst[step.captureIndex] = maybeTrim(content[pos:next], trimSpace)
+					}
+					break
+				}
+			}
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+		default:
+			continue
+		}
+
+		pos = next
+	}
+
+	return pos, true
+}
+
+func (m structuredMatcher) matchTypedLinearFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) (int, bool) {
+	if m.quickReject(content, pos) {
+		return 0, false
+	}
+	for _, step := range m.steps {
+		var next int
+		var ok bool
+
+		switch {
+		case step.literal != "":
+			if !strings.HasPrefix(content[pos:], step.literal) {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			pos += len(step.literal)
+			continue
+		case step.parser != nil:
+			if step.optional && step.deterministicOptional && shouldSkipOptionalParser(step.parser, step, content, pos) {
+				continue
+			}
+			var value string
+			next, value, ok = step.parser.consume(content, pos)
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			if step.parser.dstIndex >= 0 {
+				dst[step.parser.dstIndex] = castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex])
+			}
+		case step.submatcher != nil:
+			next, ok = step.submatcher.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex])
+			}
+		case len(step.alternatives) > 0:
+			alts := matchingAlternatives(step, content, pos)
+			for _, alt := range alts {
+				next, ok = alt.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+				if ok {
+					if step.captureIndex >= 0 {
+						dst[step.captureIndex] = castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex])
 					}
 					break
 				}
@@ -1433,8 +1550,98 @@ func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trim
 	return pos, true, changes
 }
 
+func (m structuredMatcher) matchTypedFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
+	for _, step := range m.steps {
+		var next int
+		var ok bool
+
+		switch {
+		case step.literal != "":
+			if !strings.HasPrefix(content[pos:], step.literal) {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			pos += len(step.literal)
+			continue
+		case step.parser != nil:
+			var value string
+			next, value, ok = step.parser.consume(content, pos)
+			if !ok {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			if step.parser.dstIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.parser.dstIndex, castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex]))
+			}
+		case step.submatcher != nil:
+			mark := len(changes)
+			if step.submatcher.backtracking {
+				next, ok, changes = step.submatcher.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+			} else {
+				next, ok, changes = step.submatcher.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+			}
+			if !ok {
+				if step.submatcher.writes {
+					rollbackTypedMatchChanges(dst, changes, mark)
+					changes = changes[:mark]
+				}
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			if step.captureIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+			}
+		case len(step.alternatives) > 0:
+			alts := matchingAlternatives(step, content, pos)
+			for _, alt := range alts {
+				mark := len(changes)
+				if alt.backtracking {
+					next, ok, changes = alt.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+				} else {
+					next, ok, changes = alt.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+				}
+				if ok {
+					if step.captureIndex >= 0 {
+						changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+					}
+					break
+				}
+				if alt.writes {
+					rollbackTypedMatchChanges(dst, changes, mark)
+					changes = changes[:mark]
+				}
+			}
+			if !ok {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+		default:
+			continue
+		}
+
+		pos = next
+	}
+
+	return pos, true, changes
+}
+
 func (m structuredMatcher) matchBacktrackingFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	return matchStructuredSteps(m.steps, 0, dst, content, pos, trimSpace, changes)
+}
+
+func (m structuredMatcher) matchTypedBacktrackingFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	return matchTypedStructuredSteps(m.steps, 0, dst, content, pos, trimSpace, kinds, changes)
 }
 
 func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
@@ -1466,6 +1673,39 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 
 	if step.writes {
 		rollbackMatchChanges(dst, nextChanges, mark)
+	}
+	return 0, false, changes[:mark]
+}
+
+func matchTypedStructuredSteps(steps []structuredStep, idx int, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if idx >= len(steps) {
+		return pos, true, changes
+	}
+	if len(content)-pos < steps[idx].tailMinWidth {
+		return 0, false, changes
+	}
+
+	step := steps[idx]
+	if step.parser != nil && step.parser.kind == structuredGreedyUntilLiteral && step.parser.nextLiteral != "" {
+		return matchTypedGreedyParserStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes)
+	}
+
+	mark := len(changes)
+	if step.optional {
+		return matchTypedOptionalStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes, mark)
+	}
+
+	next, ok, nextChanges := matchTypedStructuredStep(step, dst, content, pos, trimSpace, kinds, changes)
+	if !ok {
+		return 0, false, changes[:mark]
+	}
+
+	if end, okEnd, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, next, trimSpace, kinds, nextChanges); okEnd {
+		return end, true, endChanges
+	}
+
+	if step.writes {
+		rollbackTypedMatchChanges(dst, nextChanges, mark)
 	}
 	return 0, false, changes[:mark]
 }
@@ -1503,6 +1743,39 @@ func matchStructuredGreedyParserStep(steps []structuredStep, idx int, step struc
 	return 0, false, changes[:mark]
 }
 
+func matchTypedGreedyParserStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	mark := len(changes)
+	rest := content[pos:]
+	end := len(rest)
+
+	for {
+		rel := lastLiteralIndex(rest[:end], step.parser.nextLiteral)
+		if rel < 0 {
+			break
+		}
+
+		nextChanges := changes
+		if step.parser.dstIndex >= 0 {
+			nextChanges = appendTypedMatchChange(dst, nextChanges, step.parser.dstIndex, castStructuredValue(rest[:rel], trimSpace, kinds[step.parser.dstIndex]))
+		}
+
+		if matchEnd, ok, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, kinds, nextChanges); ok {
+			return matchEnd, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackTypedMatchChanges(dst, nextChanges, mark)
+		}
+
+		end = rel
+	}
+
+	if step.optional {
+		return matchTypedStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, kinds, changes[:mark])
+	}
+
+	return 0, false, changes[:mark]
+}
+
 func matchStructuredOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange, mark int) (int, bool, []matchChange) {
 	next, ok, nextChanges := matchStructuredStep(step, dst, content, pos, trimSpace, changes)
 	if ok {
@@ -1515,6 +1788,20 @@ func matchStructuredOptionalStep(steps []structuredStep, idx int, step structure
 	}
 
 	return matchStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, changes[:mark])
+}
+
+func matchTypedOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange, mark int) (int, bool, []typedMatchChange) {
+	next, ok, nextChanges := matchTypedStructuredStep(step, dst, content, pos, trimSpace, kinds, changes)
+	if ok {
+		if end, okEnd, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, next, trimSpace, kinds, nextChanges); okEnd {
+			return end, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackTypedMatchChanges(dst, nextChanges, mark)
+		}
+	}
+
+	return matchTypedStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, kinds, changes[:mark])
 }
 
 func matchStructuredStep(step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
@@ -1568,6 +1855,71 @@ func matchStructuredStep(step structuredStep, dst []string, content string, pos 
 	}
 }
 
+func matchTypedStructuredStep(step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	switch {
+	case step.literal != "":
+		if !strings.HasPrefix(content[pos:], step.literal) {
+			return 0, false, changes
+		}
+		return pos + len(step.literal), true, changes
+	case step.parser != nil:
+		next, value, ok := step.parser.consume(content, pos)
+		if !ok {
+			return 0, false, changes
+		}
+		if step.parser.dstIndex >= 0 {
+			changes = appendTypedMatchChange(dst, changes, step.parser.dstIndex, castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex]))
+		}
+		return next, true, changes
+	case step.submatcher != nil:
+		mark := len(changes)
+		next, ok, nextChanges := step.submatcher.matchTypedAnyFrom(dst, content, pos, trimSpace, kinds, changes)
+		if !ok {
+			if step.submatcher.writes {
+				rollbackTypedMatchChanges(dst, nextChanges, mark)
+				nextChanges = nextChanges[:mark]
+			}
+			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			nextChanges = appendTypedMatchChange(dst, nextChanges, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+		}
+		return next, true, nextChanges
+	case len(step.alternatives) > 0:
+		for _, alt := range matchingAlternatives(step, content, pos) {
+			mark := len(changes)
+			next, ok, nextChanges := alt.matchTypedAnyFrom(dst, content, pos, trimSpace, kinds, changes)
+			if ok {
+				if step.captureIndex >= 0 {
+					nextChanges = appendTypedMatchChange(dst, nextChanges, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+				}
+				return next, true, nextChanges
+			}
+			if alt.writes {
+				rollbackTypedMatchChanges(dst, nextChanges, mark)
+				nextChanges = nextChanges[:mark]
+			}
+		}
+		return 0, false, changes
+	default:
+		return pos, true, changes
+	}
+}
+
+func (m structuredMatcher) matchTypedAnyFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
+	if !m.backtracking && !m.changeLog && changes == nil {
+		next, ok := m.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+		return next, ok, nil
+	}
+	if m.backtracking {
+		return m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+	}
+	return m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+}
+
 func matchingAlternatives(step structuredStep, content string, pos int) []*structuredMatcher {
 	if len(step.altPrefixes) == 0 {
 		return step.alternatives
@@ -1585,6 +1937,30 @@ func (m structuredMatcher) quickReject(content string, pos int) bool {
 		return true
 	}
 	return m.ir.firstLiteralExact && m.ir.firstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.firstLiteral)
+}
+
+func appendTypedMatchChange(dst []any, changes []typedMatchChange, idx int, value any) []typedMatchChange {
+	if idx < 0 {
+		return changes
+	}
+	changes = append(changes, typedMatchChange{idx: idx, prev: dst[idx]})
+	dst[idx] = value
+	return changes
+}
+
+func rollbackTypedMatchChanges(dst []any, changes []typedMatchChange, mark int) {
+	for i := len(changes) - 1; i >= mark; i-- {
+		change := changes[i]
+		dst[change.idx] = change.prev
+	}
+}
+
+func castStructuredValue(raw string, trimSpace bool, kind valueKind) any {
+	if trimSpace {
+		raw = trimMatch(raw)
+	}
+	v, _ := castValue(raw, kind)
+	return v
 }
 
 func appendMatchChange(dst []string, changes []matchChange, idx int, value string) []matchChange {

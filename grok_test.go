@@ -1445,6 +1445,49 @@ func BenchmarkRunWithTypeInfoStructuredCommonRegexpPath(b *testing.B) {
 	}
 }
 
+func BenchmarkRunWithTypeInfoPipelineAccess(b *testing.B) {
+	pattern := `%{IPORHOST:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code:int} %{INT:bytes:int}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	line := `10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /api/orders?id=42 HTTP/1.1" 200 532`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, err := g.RunWithTypeInfo(line, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(ret) != 9 {
+			b.Fatal(ret)
+		}
+	}
+}
+
+func BenchmarkRunWithTypeInfoPipelineAccessRegexpPath(b *testing.B) {
+	pattern := `%{IPORHOST:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code:int} %{INT:bytes:int}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	line := `10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /api/orders?id=42 HTTP/1.1" 200 532`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, err := g.RunWithTypeInfo(line, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(ret) != 9 {
+			b.Fatal(ret)
+		}
+	}
+}
+
 func BenchmarkRunCommonApacheLogTo(b *testing.B) {
 	g, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
