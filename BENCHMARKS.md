@@ -10,6 +10,7 @@ These numbers compare the current structured fast path with the same patterns fo
 - Command:
   - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
   - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^BenchmarkCommonComposedPatterns/(go_|java_)' -benchmem -benchtime=300ms`
 
 ## Summary
 
@@ -67,6 +68,18 @@ These are small focused checks for common upstream grok layouts outside the Data
 | Structured SYSLOG line | 171.4 | 4693.0 | 27.4x | 48/113 | 1/2 |
 | Structured short mismatch | 2.688 | 4.682 | 1.7x | 0/0 | 0/0 |
 
+## Common Go And Java Composed Patterns
+
+These are custom, user-style composed patterns meant to reflect common Go and Java log formats rather than Datakit defaults.
+
+| Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go logfmt service line | 244.8 | 1838.0 | 7.5x | 272/176 | 2/2 |
+| Go Gin access line | 196.8 | 2348.0 | 11.9x | 96/209 | 1/2 |
+| Go worker line with optional trace | 165.9 | 625.8 | 3.8x | 80/176 | 1/2 |
+| Java logback line | 145.3 | 869.0 | 6.0x | 80/176 | 1/2 |
+| Java Spring Boot line | 186.3 | 887.2 | 4.8x | 96/208 | 1/2 |
+
 ## Notes
 
 - Slightly slower cases today: `Apache error`, `Consul`, and `MySQL slow log`
@@ -77,6 +90,7 @@ These are small focused checks for common upstream grok layouts outside the Data
 - Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
 - Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
 - `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
+- The same generic machinery also carries over to common user-composed Go and Java log formats; the current synthetic set shows roughly `3.8x` to `11.9x` wins without adding language-specific hard-coded matchers
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`
 - Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, and `Consul` is again slightly behind in this run; that remains a fallback-tuning target rather than a fast-path semantics issue
 - The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples
