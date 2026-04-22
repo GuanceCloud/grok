@@ -51,6 +51,36 @@ func loadCommonPatternCases() []commonPatternCase {
 			line:    `2026-04-22 10:11:12.123  WARN 12345 --- [nio-8080-exec-1] c.demo.OrderService : timeout calling inventory service`,
 		},
 		{
+			name:    "python_uvicorn",
+			pattern: `%{TIMESTAMP_ISO8601:time} %{LOGLEVEL:level} \[%{NOTSPACE:logger}\] %{GREEDYDATA:msg}`,
+			line:    `2026-04-22 10:11:12,123 INFO [uvicorn.error] Started server process [12345]`,
+		},
+		{
+			name:    "python_gunicorn_access",
+			pattern: `%{IPORHOST:client} - - \[%{HTTPDATE:time}\] "%{WORD:method} %{URIPATHPARAM:path} HTTP/%{NUMBER:http_version}" %{INT:status} %{INT:bytes} "%{GREEDYDATA:referrer}" "%{GREEDYDATA:agent}"`,
+			line:    `10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/1.1" 200 2 "-" "curl/8.0.1"`,
+		},
+		{
+			name:    "node_pino",
+			pattern: `level=%{INT:level} time=%{TIMESTAMP_ISO8601:time} pid=%{INT:pid} hostname=%{NOTSPACE:hostname} msg="%{GREEDYDATA:msg}"`,
+			line:    `level=30 time=2026-04-22T10:11:12.123Z pid=12345 hostname=api-01 msg="request completed"`,
+		},
+		{
+			name:    "zap_console",
+			pattern: `%{LOGLEVEL:level}%{SPACE}%{TIMESTAMP_ISO8601:time}%{SPACE}%{NOTSPACE:logger}%{SPACE}%{GREEDYDATA:msg}`,
+			line:    `INFO 2026-04-22T10:11:12.123+0800 checkout.worker request finished duration=12.4ms`,
+		},
+		{
+			name:    "logrus_text",
+			pattern: `time="%{TIMESTAMP_ISO8601:time}" level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}" component=%{NOTSPACE:component}`,
+			line:    `time="2026-04-22T10:11:12+08:00" level=warning msg="retrying request" component=payment`,
+		},
+		{
+			name:    "k8s_controller_runtime",
+			pattern: `%{TIMESTAMP_ISO8601:time}%{SPACE}%{LOGLEVEL:level}%{SPACE}%{NOTSPACE:logger}%{SPACE}%{DATA:msg}%{SPACE}controller=%{NOTSPACE:controller}%{SPACE}resource=%{GREEDYDATA:resource}%{SPACE}name=%{NOTSPACE:name}%{SPACE}namespace=%{NOTSPACE:namespace}`,
+			line:    `2026-04-22T10:11:12Z INFO controller-runtime.manager reconciled object controller=orders resource=apps/v1, Kind=Deployment name=api namespace=prod`,
+		},
+		{
 			name:    "app_kv",
 			pattern: `%{TIMESTAMP_ISO8601:time} level=%{LOGLEVEL:level} service=%{NOTSPACE:service} request_id=%{NOTSPACE:request_id} msg="%{GREEDYDATA:msg}"`,
 			line:    `2026-04-22T10:11:12Z level=INFO service=checkout request_id=req-42 msg="order created for user 42"`,

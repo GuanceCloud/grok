@@ -10,7 +10,7 @@ These numbers compare the current structured fast path with the same patterns fo
 - Command:
   - `go test -run '^$' -bench '^BenchmarkDatakitFixtures$' -benchmem -benchtime=200ms`
   - `go test -run '^$' -bench '^BenchmarkRunStructured(ShortMismatch(|RegexpPath)|LogLevelUTF(|RegexpPath)|SyslogLine(|RegexpPath))$' -benchmem -benchtime=300ms`
-  - `go test -run '^$' -bench '^BenchmarkCommonComposedPatterns/(go_|java_)' -benchmem -benchtime=300ms`
+  - `go test -run '^$' -bench '^BenchmarkCommonComposedPatterns/(go_|java_|python_|node_|zap_|logrus_|k8s_)' -benchmem -benchtime=300ms`
 
 ## Summary
 
@@ -68,17 +68,23 @@ These are small focused checks for common upstream grok layouts outside the Data
 | Structured SYSLOG line | 171.4 | 4693.0 | 27.4x | 48/113 | 1/2 |
 | Structured short mismatch | 2.688 | 4.682 | 1.7x | 0/0 | 0/0 |
 
-## Common Go And Java Composed Patterns
+## Common Application Composed Patterns
 
-These are custom, user-style composed patterns meant to reflect common Go and Java log formats rather than Datakit defaults.
+These are custom, user-style composed patterns meant to reflect common application log formats rather than Datakit defaults.
 
 | Benchmark | Fast ns/op | Regexp ns/op | Speedup | B/op fast/re | Allocs fast/re |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Go logfmt service line | 244.8 | 1838.0 | 7.5x | 272/176 | 2/2 |
-| Go Gin access line | 196.8 | 2348.0 | 11.9x | 96/209 | 1/2 |
-| Go worker line with optional trace | 165.9 | 625.8 | 3.8x | 80/176 | 1/2 |
-| Java logback line | 145.3 | 869.0 | 6.0x | 80/176 | 1/2 |
-| Java Spring Boot line | 186.3 | 887.2 | 4.8x | 96/208 | 1/2 |
+| Go logfmt service line | 240.9 | 1351.0 | 5.6x | 272/176 | 2/2 |
+| Go Gin access line | 196.6 | 2600.0 | 13.2x | 96/209 | 1/2 |
+| Go worker line with optional trace | 166.1 | 616.9 | 3.7x | 80/176 | 1/2 |
+| Java logback line | 144.9 | 888.0 | 6.1x | 80/176 | 1/2 |
+| Java Spring Boot line | 187.6 | 889.3 | 4.7x | 96/208 | 1/2 |
+| Python uvicorn line | 108.3 | 574.9 | 5.3x | 64/144 | 1/2 |
+| Python gunicorn access line | 350.1 | 24192.0 | 69.1x | 560/317 | 3/2 |
+| Node pino line | 221.8 | 501.0 | 2.3x | 272/176 | 2/2 |
+| Zap console line | 120.0 | 636.3 | 5.3x | 64/144 | 1/2 |
+| Logrus text line | 202.7 | 789.3 | 3.9x | 256/144 | 2/2 |
+| Kubernetes controller-runtime line | 1744.0 | 1833.0 | 1.1x | 272/273 | 2/2 |
 
 ## Notes
 
@@ -90,7 +96,8 @@ These are custom, user-style composed patterns meant to reflect common Go and Ja
 - Backtracking fast paths now support `GREEDYDATA` with repeated suffix literals by trying greedier cut points first and backing off only when later steps fail; this is what moved the real PostgreSQL fixture from parity to about `9x` faster while keeping capture parity with `regexp`
 - Structured planners now compute per-step and per-matcher IR metadata, including minimum width and stable boundary literals, and use that both to prune impossible branches and to preserve fast parser slicing in composed layouts such as Elasticsearch default logs
 - `Run` and `RunWithTypeInfo` now use IR-based quick rejection before allocating output buffers, which is why short mismatches are now zero-allocation and faster than the regexp path
-- The same generic machinery also carries over to common user-composed Go and Java log formats; the current synthetic set shows roughly `3.8x` to `11.9x` wins without adding language-specific hard-coded matchers
+- The same generic machinery also carries over to common user-composed application logs; the current synthetic set spans Go, Java, Python, Node.js, Zap, Logrus, and controller-runtime without adding language-specific hard-coded matchers
+- That broader set currently ranges from near parity on `controller-runtime` style reconcile logs up to about `69x` on access-style Python logs, which matches the underlying rule of thumb: fixed delimiters and stable field order benefit the most
 - The fast path already removes one allocation for most hot log formats; Elasticsearch remains at `2 allocs/op` and is still about `20x-35x` faster than pure `regexp`
 - Aggregate full-suite runs are still noisy on a couple of syslog/error layouts, and `Consul` is again slightly behind in this run; that remains a fallback-tuning target rather than a fast-path semantics issue
 - The benchmark source data lives in `testdata/datakit_pipeline_cases.json`, so new optimizations can be checked against real Datakit pipelines instead of synthetic samples
