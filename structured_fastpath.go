@@ -1250,7 +1250,7 @@ func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool,
 		return ok && next >= 0
 	}
 
-	var smallChanges [8]typedMatchChange
+	var smallChanges [10]typedMatchChange
 	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
