@@ -3,6 +3,7 @@ package grok
 import (
 	"regexp"
 	"regexp/syntax"
+	"sort"
 	"strings"
 )
 
@@ -11,6 +12,7 @@ type regexpPrefilter struct {
 	literalPrefix  string
 	literalSet     []string
 	literalExact   bool
+	required       []string
 }
 
 func buildRegexpPrefilter(expr string, re *regexp.Regexp) *regexpPrefilter {
@@ -48,7 +50,11 @@ func buildRegexpPrefilter(expr string, re *regexp.Regexp) *regexpPrefilter {
 		}
 	}
 
-	if pf.anchoredPrefix == "" && pf.literalPrefix == "" && len(pf.literalSet) == 0 {
+	if required := regexpRequiredLiterals(parsed, 4); len(required) > 0 {
+		pf.required = required
+	}
+
+	if pf.anchoredPrefix == "" && pf.literalPrefix == "" && len(pf.literalSet) == 0 && len(pf.required) == 0 {
 		return nil
 	}
 	return pf
@@ -64,23 +70,23 @@ func (pf *regexpPrefilter) rejects(content string) bool {
 	if pf.literalPrefix != "" && !strings.Contains(content, pf.literalPrefix) {
 		return true
 	}
-	if len(pf.literalSet) == 0 {
-		return false
-	}
-	if pf.literalExact {
+	if len(pf.literalSet) > 0 {
+		if pf.literalExact {
+			for _, lit := range pf.literalSet {
+				if content == lit {
+					return false
+				}
+			}
+			return true
+		}
 		for _, lit := range pf.literalSet {
-			if content == lit {
-				return false
+			if strings.Contains(content, lit) {
+				return requiredLiteralRejects(content, pf.anchoredPrefix, pf.required)
 			}
 		}
 		return true
 	}
-	for _, lit := range pf.literalSet {
-		if strings.Contains(content, lit) {
-			return false
-		}
-	}
-	return true
+	return requiredLiteralRejects(content, pf.anchoredPrefix, pf.required)
 }
 
 func hasRegexpStartAnchor(expr string) bool {
@@ -229,4 +235,174 @@ func regexpLiteralChunk(re *syntax.Regexp) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func regexpRequiredLiterals(parsed *syntax.Regexp, maxAtoms int) []string {
+	chunks, ok := regexpRequiredLiteralChunks(parsed, 32)
+	if !ok || len(chunks) == 0 {
+		return nil
+	}
+	return selectRequiredLiteralAtoms(chunks, maxAtoms)
+}
+
+func regexpRequiredLiteralChunks(re *syntax.Regexp, limit int) ([]string, bool) {
+	if re == nil {
+		return nil, true
+	}
+	if limit <= 0 {
+		return nil, false
+	}
+
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return nil, true
+		}
+		return []string{string(re.Rune)}, true
+	case syntax.OpEmptyMatch, syntax.OpBeginText, syntax.OpEndText, syntax.OpBeginLine, syntax.OpEndLine:
+		return nil, true
+	case syntax.OpCapture:
+		return regexpRequiredLiteralChunks(re.Sub[0], limit)
+	case syntax.OpConcat:
+		out := make([]string, 0, len(re.Sub))
+		for _, sub := range re.Sub {
+			parts, ok := regexpRequiredLiteralChunks(sub, limit-len(out))
+			if !ok {
+				return nil, false
+			}
+			out = append(out, parts...)
+			if len(out) > limit {
+				return nil, false
+			}
+		}
+		return out, true
+	case syntax.OpAlternate:
+		if len(re.Sub) == 0 {
+			return nil, true
+		}
+		out, ok := regexpRequiredLiteralChunks(re.Sub[0], limit)
+		if !ok {
+			return nil, false
+		}
+		for i := 1; i < len(re.Sub); i++ {
+			other, ok := regexpRequiredLiteralChunks(re.Sub[i], limit)
+			if !ok {
+				return nil, false
+			}
+			out = commonLiteralSequence(out, other)
+			if len(out) == 0 {
+				return nil, true
+			}
+		}
+		return out, true
+	case syntax.OpQuest, syntax.OpStar:
+		return nil, true
+	case syntax.OpPlus:
+		return regexpRequiredLiteralChunks(re.Sub[0], limit)
+	case syntax.OpRepeat:
+		if re.Min <= 0 {
+			return nil, true
+		}
+		return regexpRequiredLiteralChunks(re.Sub[0], limit)
+	default:
+		return nil, true
+	}
+}
+
+func commonLiteralSequence(left, right []string) []string {
+	if len(left) == 0 || len(right) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, minInt(len(left), len(right)))
+	start := 0
+	for _, lit := range left {
+		for ; start < len(right); start++ {
+			if right[start] != lit {
+				continue
+			}
+			out = append(out, lit)
+			start++
+			break
+		}
+	}
+	return out
+}
+
+func containsLiteralsInOrder(content string, literals []string) bool {
+	for _, lit := range literals {
+		if lit == "" {
+			continue
+		}
+		idx := strings.Index(content, lit)
+		if idx < 0 {
+			return false
+		}
+		content = content[idx+len(lit):]
+	}
+	return true
+}
+
+func requiredLiteralRejects(content string, anchoredPrefix string, required []string) bool {
+	if len(required) == 0 {
+		return false
+	}
+	if anchoredPrefix != "" && required[0] == anchoredPrefix {
+		if !strings.HasPrefix(content, anchoredPrefix) {
+			return true
+		}
+		content = content[len(anchoredPrefix):]
+		required = required[1:]
+	}
+	return !containsLiteralsInOrder(content, required)
+}
+
+type literalCandidate struct {
+	idx int
+	lit string
+}
+
+func selectRequiredLiteralAtoms(chunks []string, maxAtoms int) []string {
+	if len(chunks) == 0 || maxAtoms <= 0 {
+		return nil
+	}
+
+	candidates := make([]literalCandidate, 0, len(chunks))
+	for i, lit := range chunks {
+		if len(lit) < 2 {
+			continue
+		}
+		if len(candidates) > 0 && candidates[len(candidates)-1].lit == lit {
+			continue
+		}
+		candidates = append(candidates, literalCandidate{idx: i, lit: lit})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) > maxAtoms {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			if len(candidates[i].lit) != len(candidates[j].lit) {
+				return len(candidates[i].lit) > len(candidates[j].lit)
+			}
+			return candidates[i].idx < candidates[j].idx
+		})
+		candidates = candidates[:maxAtoms]
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].idx < candidates[j].idx
+		})
+	}
+
+	out := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		out[i] = candidate.lit
+	}
+	return out
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
