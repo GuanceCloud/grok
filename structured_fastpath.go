@@ -17,6 +17,16 @@ type structuredMatcher struct {
 	commonRunner   *commonApacheRunner
 	jenkinsRunner  *jenkinsRunner
 	tomcatRunner   *tomcatCatalinaRunner
+	mysqlRunner    *mysqlSimpleRunner
+	sqlserverRunner *sqlServerRunner
+	kafkaRunner    *kafkaBracketRunner
+	kingbaseRunner *kingbaseRunner
+	redisRunner    *redisRunner
+	damengRunner   *damengRunner
+	elasticRunner  *elasticRunner
+	elasticDefaultRunner *elasticDefaultRunner
+	elasticSearchRunner *elasticSearchSlowRunner
+	nginxErrorRunner *nginxErrorRunner
 	rabbitRunner   *rabbitMQRunner
 	solrRunner     *solrRunner
 	writes         bool
@@ -139,6 +149,16 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex)
 	matcher.jenkinsRunner, _ = compileJenkinsRunner(pattern, meta.nameIndex)
 	matcher.tomcatRunner, _ = compileTomcatCatalinaRunner(pattern, meta.nameIndex)
+	matcher.mysqlRunner, _ = compileMySQLSimpleRunner(pattern, meta.nameIndex)
+	matcher.sqlserverRunner, _ = compileSQLServerRunner(pattern, meta.nameIndex)
+	matcher.kafkaRunner, _ = compileKafkaBracketRunner(pattern, meta.nameIndex)
+	matcher.kingbaseRunner, _ = compileKingbaseRunner(pattern, meta.nameIndex)
+	matcher.redisRunner, _ = compileRedisRunner(pattern, meta.nameIndex)
+	matcher.damengRunner, _ = compileDamengRunner(pattern, meta.nameIndex)
+	matcher.elasticRunner, _ = compileElasticRunner(pattern, meta.nameIndex)
+	matcher.elasticDefaultRunner, _ = compileElasticDefaultRunner(pattern, meta.nameIndex)
+	matcher.elasticSearchRunner, _ = compileElasticSearchSlowRunner(pattern, meta.nameIndex)
+	matcher.nginxErrorRunner, _ = compileNginxErrorRunner(pattern, meta.nameIndex)
 	matcher.rabbitRunner, _ = compileRabbitMQRunner(pattern, steps)
 	matcher.solrRunner, _ = compileSolrRunner(pattern, steps)
 	return &matcher
@@ -1513,6 +1533,16 @@ func (m structuredMatcher) hasStartOnlyRunner() bool {
 		m.commonRunner != nil ||
 		m.jenkinsRunner != nil ||
 		m.tomcatRunner != nil ||
+		m.mysqlRunner != nil ||
+		m.sqlserverRunner != nil ||
+		m.kafkaRunner != nil ||
+		m.kingbaseRunner != nil ||
+		m.redisRunner != nil ||
+		m.damengRunner != nil ||
+		m.elasticRunner != nil ||
+		m.elasticDefaultRunner != nil ||
+		m.elasticSearchRunner != nil ||
+		m.nginxErrorRunner != nil ||
 		m.rabbitRunner != nil ||
 		m.solrRunner != nil
 }
@@ -1557,6 +1587,66 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 	}
 	if pos == 0 && m.tomcatRunner != nil {
 		if m.tomcatRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.mysqlRunner != nil {
+		if m.mysqlRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.sqlserverRunner != nil {
+		if m.sqlserverRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.kafkaRunner != nil {
+		if m.kafkaRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.kingbaseRunner != nil {
+		if m.kingbaseRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.redisRunner != nil {
+		if m.redisRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.damengRunner != nil {
+		if m.damengRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.elasticRunner != nil {
+		if m.elasticRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.elasticDefaultRunner != nil {
+		if m.elasticDefaultRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.elasticSearchRunner != nil {
+		if m.elasticSearchRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.nginxErrorRunner != nil {
+		if m.nginxErrorRunner.run(dst, content, trimSpace) {
 			return true
 		}
 		resetStringResults(dst)
@@ -1626,6 +1716,66 @@ func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, t
 	}
 	if pos == 0 && m.tomcatRunner != nil {
 		if m.tomcatRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.mysqlRunner != nil {
+		if m.mysqlRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.sqlserverRunner != nil {
+		if m.sqlserverRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.kafkaRunner != nil {
+		if m.kafkaRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.kingbaseRunner != nil {
+		if m.kingbaseRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.redisRunner != nil {
+		if m.redisRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.damengRunner != nil {
+		if m.damengRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.elasticRunner != nil {
+		if m.elasticRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.elasticDefaultRunner != nil {
+		if m.elasticDefaultRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.elasticSearchRunner != nil {
+		if m.elasticSearchRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.nginxErrorRunner != nil {
+		if m.nginxErrorRunner.runTyped(dst, content, trimSpace, kinds) {
 			return true
 		}
 		resetAnyResults(dst)
