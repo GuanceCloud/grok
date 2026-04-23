@@ -33,9 +33,11 @@ type patternRef struct {
 
 type compiledRegexpMeta struct {
 	re            *regexp.Regexp
+	filter        *regexpFilter
 	subMatchNames SubMatchName
 	nameIndex     map[string]int
 	prefilter     *regexpPrefilter
+	multiFilter   multiPatternFilter
 }
 
 var compiledRegexpCache sync.Map
@@ -364,11 +366,13 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	return &GrokRegexp{
 		grokPattern:   gP,
 		re:            meta.re,
+		filter:        meta.filter,
 		subMatchNames: meta.subMatchNames,
 		nameIndex:     meta.nameIndex,
 		valueKinds:    valueKinds,
 		fastMatcher:   buildFastMatcher(gP, storage, meta),
 		prefilter:     meta.prefilter,
+		multiFilter:   meta.multiFilter,
 	}, nil
 }
 
@@ -378,6 +382,11 @@ func loadCompiledRegexpMeta(denormalized string) (*compiledRegexpMeta, error) {
 	}
 
 	re, err := regexp.Compile(denormalized)
+	if err != nil {
+		return nil, err
+	}
+
+	multiFilter, err := compileMultiPatternFilter([]string{denormalized})
 	if err != nil {
 		return nil, err
 	}
@@ -407,9 +416,11 @@ func loadCompiledRegexpMeta(denormalized string) (*compiledRegexpMeta, error) {
 
 	meta := &compiledRegexpMeta{
 		re:            re,
+		filter:        buildRegexpFilter(denormalized),
 		subMatchNames: subMatchNames,
 		nameIndex:     nameIndex,
 		prefilter:     buildRegexpPrefilter(denormalized, re),
+		multiFilter:   multiFilter,
 	}
 	actual, _ := compiledRegexpCache.LoadOrStore(denormalized, meta)
 	return actual.(*compiledRegexpMeta), nil

@@ -68,6 +68,60 @@ SELECT 1`,
 	})
 }
 
+func FuzzStructuredElasticSearchDefaultFixtureParity(f *testing.F) {
+	fixture := mustDatakitFixtureByName(f, "elasticsearch/elasticsearch/elasticsearch/ElasticSearch_log")
+	regexpOnly := rawRegexpCopy(fixture.regexpOnly)
+	for _, seed := range []string{
+		fixture.line,
+		`[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [master] high disk watermark [90%] exceeded`,
+		`[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] high disk watermark [90%] exceeded`,
+		`[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [] high disk watermark [90%] exceeded`,
+		``,
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, line string) {
+		assertRunParity(t, fixture.current, regexpOnly, line, true)
+	})
+}
+
+func FuzzStructuredNginxAccessFixtureParity(f *testing.F) {
+	fixture := mustDatakitFixtureByName(f, "nginx/nginx/nginx/Nginx_access_log")
+	regexpOnly := rawRegexpCopy(fixture.regexpOnly)
+	for _, seed := range []string{
+		fixture.line,
+		`127.0.0.1 - - [24/Mar/2021:13:54:19 +0800] "GET /basic_status HTTP/1.1" 200 97 "-" "Mozilla/5.0"`,
+		`127.0.0.1 x - [24/Mar/2021:13:54:19 +0800] "GET /basic_status HTTP/1.1" 200 97 "-" "Mozilla/5.0"`,
+		`127.0.0.1 - x [24/Mar/2021:13:54:19 +0800] "GET /basic_status HTTP/1.1" 200 97 "-" "Mozilla/5.0"`,
+		``,
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, line string) {
+		assertRunParity(t, fixture.current, regexpOnly, line, true)
+	})
+}
+
+func FuzzStructuredTomcatCatalinaFixtureParity(f *testing.F) {
+	fixture := mustDatakitFixtureByName(f, "tomcat/tomcat/tomcat/Tomcat_Catalina_log")
+	regexpOnly := rawRegexpCopy(fixture.regexpOnly)
+	for _, seed := range []string{
+		fixture.line,
+		`06-Sep-2021 22:33:30.513 INFO [main] org.apache.catalina.startup.VersionLoggerListener.log Command line argument: -Xmx256m`,
+		`06-Sep-2021 22:33:30.513 INFO [] org.apache.catalina.startup.VersionLoggerListener.log Command line argument: -Xmx256m`,
+		`06-Sep-2021 22:33:30.513 INFO [main] x`,
+		``,
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, line string) {
+		assertRunParity(t, fixture.current, regexpOnly, line, true)
+	})
+}
+
 func FuzzRegexpPrefilterLiteralSetParity(f *testing.F) {
 	current, err := CompilePattern(`^(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa)$`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {

@@ -14,6 +14,12 @@ type datakitCompiledPattern struct {
 	regexpOnly *GrokRegexp
 }
 
+type datakitCompiledPipeline struct {
+	patterns   []datakitCompiledPattern
+	currentSet *MatcherSet
+	regexpSet  *MatcherSet
+}
+
 type datakitMatchedFixture struct {
 	name       string
 	collector  string
@@ -85,7 +91,7 @@ func loadMatchedDatakitFixtures(t testing.TB) ([]datakitMatchedFixture, []string
 			if err != nil {
 				t.Fatalf("%s/%s compile pipeline: %v", c.Collector, pipelineName, err)
 			}
-			if len(compiled) == 0 {
+			if len(compiled.patterns) == 0 {
 				continue
 			}
 
@@ -109,7 +115,7 @@ func loadMatchedDatakitFixtures(t testing.TB) ([]datakitMatchedFixture, []string
 	return fixtures, unmatched
 }
 
-func compileDatakitPipeline(script string) ([]datakitCompiledPattern, error) {
+func compileDatakitPipeline(script string) (*datakitCompiledPipeline, error) {
 	patterns := CopyDefalutPatterns()
 	lines := strings.Split(script, "\n")
 	out := make([]datakitCompiledPattern, 0, 4)
@@ -149,7 +155,20 @@ func compileDatakitPipeline(script string) ([]datakitCompiledPattern, error) {
 		}
 	}
 
-	return out, nil
+	currentSet, err := buildDatakitMatcherSet(out, false)
+	if err != nil {
+		return nil, err
+	}
+	regexpSet, err := buildDatakitMatcherSet(out, true)
+	if err != nil {
+		return nil, err
+	}
+
+	return &datakitCompiledPipeline{
+		patterns:   out,
+		currentSet: currentSet,
+		regexpSet:  regexpSet,
+	}, nil
 }
 
 func compileDatakitPattern(pattern string, patterns map[string]string) (*GrokRegexp, *GrokRegexp, error) {
@@ -176,12 +195,12 @@ func compileDatakitPattern(pattern string, patterns map[string]string) (*GrokReg
 	return current, regexpOnly, nil
 }
 
-func matchDatakitExample(name string, collector string, line string, patterns []datakitCompiledPattern) (datakitMatchedFixture, bool, error) {
-	currentIdx, currentRet, currentG, err := firstMatchingPattern(line, patterns, false)
+func matchDatakitExample(name string, collector string, line string, pipeline *datakitCompiledPipeline) (datakitMatchedFixture, bool, error) {
+	currentIdx, currentRet, currentG, err := firstMatchingPattern(line, pipeline, false)
 	if err != nil {
 		return datakitMatchedFixture{}, false, err
 	}
-	regexpIdx, regexpRet, regexpG, err := firstMatchingPattern(line, patterns, true)
+	regexpIdx, regexpRet, regexpG, err := firstMatchingPattern(line, pipeline, true)
 	if err != nil {
 		return datakitMatchedFixture{}, false, err
 	}
@@ -193,35 +212,116 @@ func matchDatakitExample(name string, collector string, line string, patterns []
 		return datakitMatchedFixture{}, false, nil
 	}
 	if !reflect.DeepEqual(currentRet, regexpRet) {
-		return datakitMatchedFixture{}, false, fmt.Errorf("match result diverged on pattern %q", patterns[currentIdx].pattern)
+		return datakitMatchedFixture{}, false, fmt.Errorf("match result diverged on pattern %q", pipeline.patterns[currentIdx].pattern)
 	}
 
 	return datakitMatchedFixture{
 		name:       name,
 		collector:  collector,
-		pattern:    patterns[currentIdx].pattern,
+		pattern:    pipeline.patterns[currentIdx].pattern,
 		line:       line,
 		current:    currentG,
 		regexpOnly: regexpG,
 	}, true, nil
 }
 
-func firstMatchingPattern(line string, patterns []datakitCompiledPattern, regexpOnly bool) (int, []string, *GrokRegexp, error) {
+func firstMatchingPattern(line string, pipeline *datakitCompiledPipeline, regexpOnly bool) (int, []string, *GrokRegexp, error) {
+	if pipeline == nil {
+		return -1, nil, nil, nil
+	}
+
+	set := pipeline.currentSet
+	if regexpOnly {
+		set = pipeline.regexpSet
+	}
+	if set == nil {
+		return -1, nil, nil, nil
+	}
+
+	idx, ret, err := set.runFirstIndex(line, true)
+	if err == ErrMismatch {
+		return -1, nil, nil, nil
+	}
+	if err != nil {
+		return -1, nil, nil, err
+	}
+	pattern := pipeline.patterns[idx]
+	g := pattern.current
+	if regexpOnly {
+		g = pattern.regexpOnly
+	}
+	return idx, ret, g, nil
+}
+
+func buildDatakitMatcherSet(patterns []datakitCompiledPattern, regexpOnly bool) (*MatcherSet, error) {
+	items := make([]MatcherSetPattern, 0, len(patterns))
 	for idx, pattern := range patterns {
 		g := pattern.current
 		if regexpOnly {
 			g = pattern.regexpOnly
 		}
+		items = append(items, MatcherSetPattern{
+			ID:      strconv.Itoa(idx),
+			Matcher: g,
+		})
+	}
+	return NewMatcherSet(items)
+}
 
-		ret, err := g.Run(line, true)
-		if err == nil {
-			return idx, ret, g, nil
-		}
-		if err != ErrMismatch {
-			return -1, nil, nil, err
+func BenchmarkDatakitPipelineDispatch(b *testing.B) {
+	cases := loadDatakitFixtureCases(b)
+	for _, c := range cases {
+		for pipelineName, script := range c.Pipelines {
+			compiled, err := compileDatakitPipeline(script)
+			if err != nil {
+				b.Fatalf("%s/%s compile pipeline: %v", c.Collector, pipelineName, err)
+			}
+			if len(compiled.patterns) < 2 {
+				continue
+			}
+
+			for _, examples := range c.Examples {
+				for _, line := range examples {
+					name := sanitizeFixtureName(c.Collector + "/" + pipelineName)
+					b.Run(name, func(b *testing.B) {
+						b.Run("matcher_set", func(b *testing.B) {
+							b.ReportAllocs()
+							for i := 0; i < b.N; i++ {
+								_, _, err := compiled.currentSet.runFirstIndex(line, true)
+								if err != nil {
+									b.Fatal(err)
+								}
+							}
+						})
+						b.Run("manual_loop", func(b *testing.B) {
+							b.ReportAllocs()
+							for i := 0; i < b.N; i++ {
+								found := false
+								for _, pattern := range compiled.patterns {
+									ret, err := pattern.current.Run(line, true)
+									if err == nil {
+										if len(ret) == 0 {
+											b.Fatal("empty result")
+										}
+										found = true
+										break
+									}
+									if err != ErrMismatch {
+										b.Fatal(err)
+									}
+								}
+								if !found {
+									b.Fatal("expected match")
+								}
+							}
+						})
+					})
+					goto nextPipeline
+				}
+			}
+		nextPipeline:
 		}
 	}
-	return -1, nil, nil, nil
 }
 
 func extractPipelineQuotedArgs(line string) ([]string, error) {

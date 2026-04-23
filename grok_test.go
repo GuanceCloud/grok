@@ -54,11 +54,11 @@ func TestStructuredIRMetadata(t *testing.T) {
 	if g.fastMatcher == nil {
 		t.Fatal("expected structured matcher")
 	}
-	if got, want := g.fastMatcher.ir.minWidth, 5; got != want {
+	if got, want := g.fastMatcher.ir.MinWidth, 5; got != want {
 		t.Fatalf("minWidth = %d, want %d", got, want)
 	}
-	if g.fastMatcher.ir.firstLiteral != "" {
-		t.Fatalf("unexpected firstLiteral %q", g.fastMatcher.ir.firstLiteral)
+	if g.fastMatcher.ir.FirstLiteral != "" {
+		t.Fatalf("unexpected firstLiteral %q", g.fastMatcher.ir.FirstLiteral)
 	}
 
 	optional, err := CompilePattern(`%{WORD:name}?bar`, PatternStorage{defalutDenormalizedPatterns})
@@ -68,10 +68,10 @@ func TestStructuredIRMetadata(t *testing.T) {
 	if optional.fastMatcher == nil {
 		t.Fatal("expected optional matcher")
 	}
-	if optional.fastMatcher.ir.firstLiteral != "" {
-		t.Fatalf("optional matcher firstLiteral = %q, want empty", optional.fastMatcher.ir.firstLiteral)
+	if optional.fastMatcher.ir.FirstLiteral != "" {
+		t.Fatalf("optional matcher firstLiteral = %q, want empty", optional.fastMatcher.ir.FirstLiteral)
 	}
-	if got, want := optional.fastMatcher.ir.lastLiteral, "bar"; got != want {
+	if got, want := optional.fastMatcher.ir.LastLiteral, "bar"; got != want {
 		t.Fatalf("lastLiteral = %q, want %q", got, want)
 	}
 }
@@ -632,8 +632,16 @@ func TestStructuredNginxAccessPattern(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if g.fastMatcher == nil || g.fastMatcher.accessRunner == nil {
+		t.Fatalf("expected nginx access pattern to use access runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
+	}
 
 	line := `127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`
+	dst := make([]string, len(g.subMatchNames.name))
+	if !g.fastMatcher.accessRunner.run(dst, line, true) {
+		t.Fatalf("expected nginx access runner to match line, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
+	}
+
 	ret, err := g.Run(line, true)
 	if err != nil {
 		t.Fatal(err)
@@ -660,8 +668,15 @@ func TestStructuredJenkinsPatternUsesFastMatcher(t *testing.T) {
 	if g.fastMatcher == nil {
 		t.Fatal("expected jenkins pattern to use structured fast matcher")
 	}
+	if g.fastMatcher.jenkinsRunner == nil {
+		t.Fatal("expected jenkins pattern to use jenkins runner")
+	}
 
 	line := `2021-05-18 03:08:58.053+0000 [id=32]	INFO	jenkins.InitReactorRunner$1#onAttained: Started all plugins`
+	dst := make([]string, len(g.subMatchNames.name))
+	if !g.fastMatcher.jenkinsRunner.run(dst, line, true) {
+		t.Fatalf("expected jenkins runner to match line, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
+	}
 	ret, err := g.Run(line, true)
 	if err != nil {
 		t.Fatal(err)
@@ -670,6 +685,29 @@ func TestStructuredJenkinsPatternUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, "2021-05-18 03:08:58.053+0000", ret[g.nameIndex["time"]])
 	assert.Equal(t, "32", ret[g.nameIndex["id"]])
 	assert.Equal(t, "INFO", ret[g.nameIndex["status"]])
+}
+
+func TestStructuredJenkinsFixtureUsesFastMatcher(t *testing.T) {
+	fixture := mustDatakitFixtureByName(t, "jenkins/jenkins/jenkins/Jenkins_log")
+	if fixture.current.fastMatcher == nil {
+		t.Fatal("expected jenkins fixture to use structured fast matcher")
+	}
+	if fixture.current.fastMatcher.jenkinsRunner == nil {
+		t.Fatal("expected jenkins fixture to use jenkins runner")
+	}
+
+	dst := make([]string, len(fixture.current.subMatchNames.name))
+	if !fixture.current.fastMatcher.jenkinsRunner.run(dst, fixture.line, true) {
+		t.Fatalf("expected jenkins runner to match line, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		t.Fatalf("expected jenkins fixture fast matcher to succeed, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+
+	fastRet, fastErr := fixture.current.Run(fixture.line, true)
+	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
 }
 
 func TestStructuredSimpleCharClassPattern(t *testing.T) {
@@ -835,11 +873,11 @@ func TestStructuredPostgreSQLPatternUsesFastMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compiled) == 0 {
+	if len(compiled.patterns) == 0 {
 		t.Fatal("expected compiled postgresql patterns")
 	}
 
-	g := compiled[0].current
+	g := compiled.patterns[0].current
 	if g.fastMatcher == nil {
 		t.Fatal("expected postgresql pattern to use structured fast matcher")
 	}
@@ -1147,6 +1185,9 @@ func TestStructuredSolrFixtureUsesFastMatcher(t *testing.T) {
 		if fixture.current.fastMatcher == nil {
 			t.Fatal("expected solr fixture to use structured fast matcher")
 		}
+		if fixture.current.fastMatcher.solrRunner == nil {
+			t.Fatal("expected solr fixture to use solr runner")
+		}
 
 		dst := make([]string, len(fixture.current.subMatchNames.name))
 		if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
@@ -1192,11 +1233,60 @@ func TestStructuredTomcatCatalinaFixtureUsesFastMatcher(t *testing.T) {
 	if fixture.current.fastMatcher == nil {
 		t.Fatal("expected tomcat catalina fixture to use structured fast matcher")
 	}
+	if fixture.current.fastMatcher.tomcatRunner == nil {
+		t.Fatal("expected tomcat catalina fixture to use tomcat catalina runner")
+	}
 
 	dst := make([]string, len(fixture.current.subMatchNames.name))
 	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
 		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
 		t.Fatalf("expected tomcat catalina fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+
+	fastRet, fastErr := fixture.current.Run(fixture.line, true)
+	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredRabbitMQFixtureUsesFastMatcher(t *testing.T) {
+	fixture := mustDatakitFixtureByName(t, "rabbitmq/rabbitmq/rabbitmq/RabbitMQ_log")
+	if fixture.current.fastMatcher == nil {
+		t.Fatal("expected rabbitmq fixture to use structured fast matcher")
+	}
+	if fixture.current.fastMatcher.rabbitRunner == nil {
+		t.Fatal("expected rabbitmq fixture to use rabbit runner")
+	}
+
+	dst := make([]string, len(fixture.current.subMatchNames.name))
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
+		t.Fatalf("expected rabbitmq fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+
+	fastRet, fastErr := fixture.current.Run(fixture.line, true)
+	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredNginxAccessFixtureUsesFastMatcher(t *testing.T) {
+	fixture := mustDatakitFixtureByName(t, "nginx/nginx/nginx/Nginx_access_log")
+	if fixture.current.fastMatcher == nil {
+		t.Fatal("expected nginx access fixture to use structured fast matcher")
+	}
+	if fixture.current.fastMatcher.accessRunner == nil {
+		t.Fatalf("expected nginx access fixture to use access runner, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+	dst := make([]string, len(fixture.current.subMatchNames.name))
+	if !fixture.current.fastMatcher.accessRunner.run(dst, fixture.line, true) {
+		t.Fatalf("expected nginx access runner to match fixture line, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
+	}
+
+	dst = make([]string, len(fixture.current.subMatchNames.name))
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
+		t.Fatalf("expected nginx access fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
@@ -1456,7 +1546,7 @@ func TestStructuredLogLevelMatchesDefaultRegexp(t *testing.T) {
 		"er", "err", "error",
 		"cri", "crit", "critical",
 		"fatal", "SEVERE", "emerg", "emergency",
-		"verbose",
+		"verbose", "WAr",
 	}
 
 	for _, line := range cases {
@@ -1639,8 +1729,12 @@ func TestRegexpPrefilterLiteralSet(t *testing.T) {
 		t.Fatal("expected anchored alternation to use exact literal set")
 	}
 	assert.Equal(t, []string{"foo", "bar", "baz"}, anchored.prefilter.literalSet)
+	assert.Equal(t, []string{"foo", "bar", "baz"}, anchored.prefilter.exactByLen[3])
 	if !anchored.prefilter.rejects("qux") {
 		t.Fatal("expected exact literal set to reject unrelated string")
+	}
+	if !anchored.prefilter.rejects(strings.Repeat("x", 64)) {
+		t.Fatal("expected exact literal set length bucket to reject long mismatch")
 	}
 	if !anchored.prefilter.rejects("xxbaryy") {
 		t.Fatal("expected exact literal set to reject partial match content")
@@ -1766,15 +1860,15 @@ func TestRunToReuseBuffer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	buf := make([]string, 0, g.matchCount()+4)
+	buf := make([]string, 0, g.MatchCount()+4)
 	line := `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`
 
-	ret, err := g.runTo(line, true, buf)
+	ret, err := g.RunTo(line, true, buf)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(ret) != g.matchCount() {
+	if len(ret) != g.MatchCount() {
 		t.Fatalf("unexpected len: %d", len(ret))
 	}
 
@@ -1794,8 +1888,8 @@ func TestRunWithTypeInfoToReuseBuffer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	buf := make([]any, 0, g.matchCount()+2)
-	ret, err := g.runWithTypeInfoTo("1 true 1.1", true, buf)
+	buf := make([]any, 0, g.MatchCount()+2)
+	ret, err := g.RunWithTypeInfoTo("1 true 1.1", true, buf)
 	if err != nil {
 		t.Fatal(err)
 	}

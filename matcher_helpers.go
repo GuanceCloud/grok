@@ -208,6 +208,10 @@ func consumeTimestampISO8601(s string, start int) (int, bool) {
 }
 
 func consumeHTTPDate(s string, start int) (int, bool) {
+	if next, ok := consumeCanonicalHTTPDate(s, start); ok {
+		return next, true
+	}
+
 	i := start
 	if !consumeTwoDigitRange(s, &i, 1, 31, true) || i >= len(s) || s[i] != '/' {
 		return 0, false
@@ -243,6 +247,134 @@ func consumeHTTPDate(s string, start int) (int, bool) {
 		return 0, false
 	}
 	return i, true
+}
+
+func consumeCanonicalHTTPDate(s string, start int) (int, bool) {
+	i := start
+	if i+26 > len(s) {
+		return 0, false
+	}
+
+	if !isASCIIDigit(s[i]) || !isASCIIDigit(s[i+1]) || s[i+2] != '/' {
+		return 0, false
+	}
+	day := int(s[i]-'0')*10 + int(s[i+1]-'0')
+	if day < 1 || day > 31 {
+		return 0, false
+	}
+	i += 3
+
+	if !isCanonicalMonthAbbrev(s[i : i+3]) || s[i+3] != '/' {
+		return 0, false
+	}
+	i += 4
+
+	if !consumeNDigits(s, &i, 4) || i >= len(s) || s[i] != ':' {
+		return 0, false
+	}
+	i++
+
+	if !consumeCanonicalTwoDigitRange(s, &i, 0, 23) || i >= len(s) || s[i] != ':' {
+		return 0, false
+	}
+	i++
+	if !consumeCanonicalTwoDigitRange(s, &i, 0, 59) || i >= len(s) || s[i] != ':' {
+		return 0, false
+	}
+	i++
+	if !consumeCanonicalTwoDigitRange(s, &i, 0, 60) || i >= len(s) || s[i] != ' ' {
+		return 0, false
+	}
+	i++
+
+	if i+5 > len(s) || (s[i] != '+' && s[i] != '-') {
+		return 0, false
+	}
+	i++
+	if !consumeNDigits(s, &i, 4) {
+		return 0, false
+	}
+	return i, true
+}
+
+func consumeCanonicalTwoDigitRange(s string, i *int, min int, max int) bool {
+	if *i+2 > len(s) {
+		return false
+	}
+	a := s[*i]
+	b := s[*i+1]
+	if !isASCIIDigit(a) || !isASCIIDigit(b) {
+		return false
+	}
+	v := int(a-'0')*10 + int(b-'0')
+	if v < min || v > max {
+		return false
+	}
+	*i += 2
+	return true
+}
+
+func isCanonicalMonthAbbrev(s string) bool {
+	if len(s) != 3 {
+		return false
+	}
+	if !isCanonicalAlphaCase(s) {
+		return false
+	}
+	switch s[0] | 0x20 {
+	case 'a':
+		return (s[1]|0x20) == 'p' && (s[2]|0x20) == 'r' || (s[1]|0x20) == 'u' && (s[2]|0x20) == 'g'
+	case 'd':
+		return (s[1]|0x20) == 'e' && (s[2]|0x20) == 'c'
+	case 'f':
+		return (s[1]|0x20) == 'e' && (s[2]|0x20) == 'b'
+	case 'j':
+		b1 := s[1] | 0x20
+		b2 := s[2] | 0x20
+		return (b1 == 'a' && b2 == 'n') || (b1 == 'u' && b2 == 'n') || (b1 == 'u' && b2 == 'l')
+	case 'm':
+		return (s[1]|0x20) == 'a' && (s[2]|0x20) == 'r'
+	case 'n':
+		return (s[1]|0x20) == 'o' && (s[2]|0x20) == 'v'
+	case 'o':
+		return (s[1]|0x20) == 'c' && (s[2]|0x20) == 't'
+	case 's':
+		return (s[1]|0x20) == 'e' && (s[2]|0x20) == 'p'
+	default:
+		return false
+	}
+}
+
+func isCanonicalAlphaCase(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+
+	allLower := true
+	allUpper := true
+	title := true
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 'A' || (c > 'Z' && c < 'a') || c > 'z' {
+			return false
+		}
+		if c < 'a' || c > 'z' {
+			allLower = false
+		}
+		if c < 'A' || c > 'Z' {
+			allUpper = false
+		}
+		if i == 0 {
+			if c < 'A' || c > 'Z' {
+				title = false
+			}
+		} else if c < 'a' || c > 'z' {
+			title = false
+		}
+	}
+
+	return allLower || allUpper || title
 }
 
 func consumeTimeOfDay(s string, start int) (int, bool) {
@@ -417,11 +549,52 @@ func isDayNameValue(s string) bool {
 
 func isLogLevelValue(s string) bool {
 	for _, candidate := range logLevelValues {
-		if equalFoldLiteral(s, candidate) {
+		if matchesLogLevelCase(candidate, s) {
 			return true
 		}
 	}
 	return false
+}
+
+func matchesLogLevelCase(lower, actual string) bool {
+	if len(actual) != len(lower) {
+		return false
+	}
+
+	lowerMatch := true
+	upperMatch := true
+	titleMatch := true
+
+	for i := 0; i < len(lower); i++ {
+		wantLower := lower[i]
+		got := actual[i]
+
+		if got != wantLower {
+			lowerMatch = false
+		}
+
+		wantUpper := wantLower
+		if 'a' <= wantUpper && wantUpper <= 'z' {
+			wantUpper -= 'a' - 'A'
+		}
+		if got != wantUpper {
+			upperMatch = false
+		}
+
+		wantTitle := wantLower
+		if i == 0 && 'a' <= wantTitle && wantTitle <= 'z' {
+			wantTitle -= 'a' - 'A'
+		}
+		if got != wantTitle {
+			titleMatch = false
+		}
+
+		if !lowerMatch && !upperMatch && !titleMatch {
+			return false
+		}
+	}
+
+	return lowerMatch || upperMatch || titleMatch
 }
 
 func equalFoldLiteral(s, literal string) bool {

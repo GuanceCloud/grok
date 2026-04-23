@@ -12,6 +12,7 @@ type regexpPrefilter struct {
 	literalPrefix  string
 	literalSet     []string
 	literalExact   bool
+	exactByLen     map[int][]string
 	required       []string
 }
 
@@ -45,6 +46,9 @@ func buildRegexpPrefilter(expr string, re *regexp.Regexp) *regexpPrefilter {
 	if literals, exact := exactLiteralSet(parsed); len(literals) > 0 {
 		pf.literalSet = literals
 		pf.literalExact = exact
+		if exact {
+			pf.exactByLen = buildLiteralLengthBuckets(literals)
+		}
 		if exact && len(literals) == 1 {
 			pf.anchoredPrefix = literals[0]
 		}
@@ -72,12 +76,7 @@ func (pf *regexpPrefilter) rejects(content string) bool {
 	}
 	if len(pf.literalSet) > 0 {
 		if pf.literalExact {
-			for _, lit := range pf.literalSet {
-				if content == lit {
-					return false
-				}
-			}
-			return true
+			return !pf.matchesExactLiteral(content)
 		}
 		for _, lit := range pf.literalSet {
 			if strings.Contains(content, lit) {
@@ -87,6 +86,38 @@ func (pf *regexpPrefilter) rejects(content string) bool {
 		return true
 	}
 	return requiredLiteralRejects(content, pf.anchoredPrefix, pf.required)
+}
+
+func (pf *regexpPrefilter) matchesExactLiteral(content string) bool {
+	if pf == nil {
+		return false
+	}
+	if len(pf.exactByLen) == 0 {
+		for _, lit := range pf.literalSet {
+			if content == lit {
+				return true
+			}
+		}
+		return false
+	}
+	for _, lit := range pf.exactByLen[len(content)] {
+		if content == lit {
+			return true
+		}
+	}
+	return false
+}
+
+func buildLiteralLengthBuckets(literals []string) map[int][]string {
+	if len(literals) == 0 {
+		return nil
+	}
+	buckets := make(map[int][]string, len(literals))
+	for _, lit := range literals {
+		n := len(lit)
+		buckets[n] = append(buckets[n], lit)
+	}
+	return buckets
 }
 
 func hasRegexpStartAnchor(expr string) bool {

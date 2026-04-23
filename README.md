@@ -4,8 +4,10 @@ This library is a fork of [github.com/vjeantet/grok](https://github.com/vjeantet
 
 ## Project Notes
 
-- Performance results: [BENCHMARKS.md](./BENCHMARKS.md)
-- Performance conclusions and next-stage plan: [PERFORMANCE_NOTES.md](./PERFORMANCE_NOTES.md)
+- Performance results: [docs/perf/BENCHMARKS.md](./docs/perf/BENCHMARKS.md)
+- Performance conclusions, exact-literal prefilter notes, and the global dispatcher draft: [docs/perf/PERFORMANCE_NOTES.md](./docs/perf/PERFORMANCE_NOTES.md)
+- Project layout and runtime layering: [docs/architecture/PROJECT_LAYOUT.md](./docs/architecture/PROJECT_LAYOUT.md)
+- Local handoff context for ongoing work: [docs/context/CURRENT_CONTEXT.md](./docs/context/CURRENT_CONTEXT.md)
 
 ## Usage
 
@@ -51,6 +53,16 @@ func main() {
   }
 }
 
+```
+
+### Reusable Typed Entry Point
+
+For callers such as `pipeline-go` that want to reuse result buffers, use
+`RunWithTypeInfoTo`:
+
+```go
+buf := make([]any, 0, g.MatchCount())
+ret, err := g.RunWithTypeInfoTo(line, true, buf)
 ```
 
 output:

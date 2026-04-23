@@ -1,20 +1,28 @@
 package grok
 
 import (
+	internalmatch "github.com/GuanceCloud/grok/internal/match"
 	"net"
 	"strings"
 	"unicode/utf8"
 )
 
 type structuredMatcher struct {
-	steps         []structuredStep
-	ir            structuredIRInfo
-	required      []string
-	anchoredStart bool
-	writes        bool
-	backtracking  bool
-	changeLog     bool
-	changeCap     int
+	steps          []structuredStep
+	ir             structuredIRInfo
+	required       []string
+	anchoredStart  bool
+	anchoredRunner *anchoredDissectRunner
+	accessRunner   *accessLogRunner
+	commonRunner   *commonApacheRunner
+	jenkinsRunner  *jenkinsRunner
+	tomcatRunner   *tomcatCatalinaRunner
+	rabbitRunner   *rabbitMQRunner
+	solrRunner     *solrRunner
+	writes         bool
+	backtracking   bool
+	changeLog      bool
+	changeCap      int
 }
 
 type matchChange struct {
@@ -44,14 +52,7 @@ type structuredStep struct {
 	writes                bool
 }
 
-type structuredIRInfo struct {
-	minWidth          int
-	nullable          bool
-	firstLiteral      string
-	firstLiteralExact bool
-	lastLiteral       string
-	lastLiteralExact  bool
-}
+type structuredIRInfo = internalmatch.StructuredIRInfo
 
 type structuredParser struct {
 	alias         string
@@ -68,42 +69,40 @@ type structuredParser struct {
 	wrapSuffix    string
 }
 
-type asciiCharClass struct {
-	table [256]bool
-}
+type asciiCharClass = internalmatch.ASCIICharClass
 
-type structuredKind uint8
+type structuredKind = internalmatch.StructuredKind
 
 const (
-	structuredWord structuredKind = iota
-	structuredNotSpace
-	structuredHostName
-	structuredIPOrHost
-	structuredNumber
-	structuredInt
-	structuredPosInt
-	structuredNonNegInt
-	structuredCharClass
-	structuredMonthName
-	structuredDayName
-	structuredTimeOfDay
-	structuredYear
-	structuredMonthNum
-	structuredMonthDay
-	structuredHour
-	structuredMinute
-	structuredSecond
-	structuredQuoted
-	structuredUntilLiteral
-	structuredGreedyUntilLiteral
-	structuredSpaceOne
-	structuredSpacePlus
-	structuredSpaceStar
-	structuredTimestampISO8601
-	structuredURIPath
-	structuredURIPathParam
-	structuredHTTPDate
-	structuredLogLevel
+	structuredWord               = internalmatch.StructuredWord
+	structuredNotSpace           = internalmatch.StructuredNotSpace
+	structuredHostName           = internalmatch.StructuredHostName
+	structuredIPOrHost           = internalmatch.StructuredIPOrHost
+	structuredNumber             = internalmatch.StructuredNumber
+	structuredInt                = internalmatch.StructuredInt
+	structuredPosInt             = internalmatch.StructuredPosInt
+	structuredNonNegInt          = internalmatch.StructuredNonNegInt
+	structuredCharClass          = internalmatch.StructuredCharClass
+	structuredMonthName          = internalmatch.StructuredMonthName
+	structuredDayName            = internalmatch.StructuredDayName
+	structuredTimeOfDay          = internalmatch.StructuredTimeOfDay
+	structuredYear               = internalmatch.StructuredYear
+	structuredMonthNum           = internalmatch.StructuredMonthNum
+	structuredMonthDay           = internalmatch.StructuredMonthDay
+	structuredHour               = internalmatch.StructuredHour
+	structuredMinute             = internalmatch.StructuredMinute
+	structuredSecond             = internalmatch.StructuredSecond
+	structuredQuoted             = internalmatch.StructuredQuoted
+	structuredUntilLiteral       = internalmatch.StructuredUntilLiteral
+	structuredGreedyUntilLiteral = internalmatch.StructuredGreedyUntilLiteral
+	structuredSpaceOne           = internalmatch.StructuredSpaceOne
+	structuredSpacePlus          = internalmatch.StructuredSpacePlus
+	structuredSpaceStar          = internalmatch.StructuredSpaceStar
+	structuredTimestampISO8601   = internalmatch.StructuredTimestampISO8601
+	structuredURIPath            = internalmatch.StructuredURIPath
+	structuredURIPathParam       = internalmatch.StructuredURIPathParam
+	structuredHTTPDate           = internalmatch.StructuredHTTPDate
+	structuredLogLevel           = internalmatch.StructuredLogLevel
 )
 
 func buildFastMatcher(gP *GrokPattern, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
@@ -135,6 +134,13 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 		changeLog:     matcherNeedsChangeLog(steps),
 		changeCap:     matcherChangeCapacity(steps),
 	}
+	matcher.anchoredRunner, _ = compileAnchoredDissectRunner(steps, matcher.anchoredStart)
+	matcher.accessRunner, _ = compileAccessRunner(steps)
+	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex)
+	matcher.jenkinsRunner, _ = compileJenkinsRunner(pattern, meta.nameIndex)
+	matcher.tomcatRunner, _ = compileTomcatCatalinaRunner(pattern, meta.nameIndex)
+	matcher.rabbitRunner, _ = compileRabbitMQRunner(pattern, steps)
+	matcher.solrRunner, _ = compileSolrRunner(pattern, steps)
 	return &matcher
 }
 
@@ -201,17 +207,17 @@ func configureStructuredSteps(steps []structuredStep) {
 	}
 
 	tailMinWidth := 0
-	nextIR := emptyStructuredIRInfo()
+	nextIR := internalmatch.EmptyIRInfo()
 	for i := len(steps) - 1; i >= 0; i-- {
 		steps[i].ir = buildStructuredStepIR(steps[i])
 		steps[i].nextIR = nextIR
-		requiredMinWidth := steps[i].ir.minWidth
+		requiredMinWidth := steps[i].ir.MinWidth
 		if steps[i].optional {
 			requiredMinWidth = 0
 		}
 		steps[i].tailMinWidth = tailMinWidth + requiredMinWidth
 		tailMinWidth = steps[i].tailMinWidth
-		nextIR = combineStructuredIR(steps[i].ir, nextIR)
+		nextIR = internalmatch.CombineIR(steps[i].ir, nextIR)
 	}
 
 	for i := range steps {
@@ -226,8 +232,8 @@ func configureStructuredSteps(steps []structuredStep) {
 			if steps[i].parser != nil && steps[i].parser.nextLiteral != "" && !steps[i].parser.allowEmpty {
 				steps[i].optPrefix = steps[i].parser.nextLiteral
 				steps[i].optPrefixSkips = true
-			} else if steps[i].ir.firstLiteralExact {
-				steps[i].optPrefix = steps[i].ir.firstLiteral
+			} else if steps[i].ir.FirstLiteralExact {
+				steps[i].optPrefix = steps[i].ir.FirstLiteral
 				steps[i].optPrefixSkips = false
 			}
 			steps[i].deterministicOptional = isDeterministicOptionalStep(steps, i)
@@ -236,45 +242,21 @@ func configureStructuredSteps(steps []structuredStep) {
 }
 
 func buildStructuredMatcherIR(steps []structuredStep) structuredIRInfo {
-	info := emptyStructuredIRInfo()
+	info := internalmatch.EmptyIRInfo()
 	if len(steps) == 0 {
 		return info
 	}
 
 	for i := range steps {
 		stepInfo := steps[i].ir
-		info.minWidth += stepInfo.minWidth
-		if !stepInfo.nullable {
-			info.nullable = false
+		info.MinWidth += stepInfo.MinWidth
+		if !stepInfo.Nullable {
+			info.Nullable = false
 		}
 	}
 
-	info.firstLiteral, info.firstLiteralExact = matcherBoundaryLiteral(steps, true)
-	info.lastLiteral, info.lastLiteralExact = matcherBoundaryLiteral(steps, false)
-	return info
-}
-
-func emptyStructuredIRInfo() structuredIRInfo {
-	return structuredIRInfo{
-		nullable:          true,
-		firstLiteralExact: true,
-		lastLiteralExact:  true,
-	}
-}
-
-func combineStructuredIR(parts ...structuredIRInfo) structuredIRInfo {
-	info := emptyStructuredIRInfo()
-	if len(parts) == 0 {
-		return info
-	}
-	for _, part := range parts {
-		info.minWidth += part.minWidth
-		if !part.nullable {
-			info.nullable = false
-		}
-	}
-	info.firstLiteral, info.firstLiteralExact = irBoundaryLiteral(parts, true)
-	info.lastLiteral, info.lastLiteralExact = irBoundaryLiteral(parts, false)
+	info.FirstLiteral, info.FirstLiteralExact = matcherBoundaryLiteral(steps, true)
+	info.LastLiteral, info.LastLiteralExact = matcherBoundaryLiteral(steps, false)
 	return info
 }
 
@@ -283,46 +265,46 @@ func buildStructuredStepIR(step structuredStep) structuredIRInfo {
 
 	switch {
 	case step.literal != "":
-		info.minWidth = len(step.literal)
-		info.firstLiteral = step.literal
-		info.lastLiteral = step.literal
-		info.firstLiteralExact = true
-		info.lastLiteralExact = true
+		info.MinWidth = len(step.literal)
+		info.FirstLiteral = step.literal
+		info.LastLiteral = step.literal
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
 	case step.parser != nil:
-		info.minWidth = parserMinWidth(step.parser)
-		info.nullable = step.parser.allowEmpty
+		info.MinWidth = parserMinWidth(step.parser)
+		info.Nullable = step.parser.allowEmpty
 		if step.parser.wrapPrefix != "" {
-			info.firstLiteral = step.parser.wrapPrefix
-			info.firstLiteralExact = true
+			info.FirstLiteral = step.parser.wrapPrefix
+			info.FirstLiteralExact = true
 		}
 		if step.parser.wrapSuffix != "" {
-			info.lastLiteral = step.parser.wrapSuffix
-			info.lastLiteralExact = true
+			info.LastLiteral = step.parser.wrapSuffix
+			info.LastLiteralExact = true
 		}
 	case step.submatcher != nil:
 		info = step.submatcher.ir
 	case len(step.alternatives) > 0:
 		info = buildAlternativeIR(step.alternatives)
 	default:
-		info.nullable = true
-		info.firstLiteralExact = true
-		info.lastLiteralExact = true
+		info.Nullable = true
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
 	}
 
 	if step.optional {
-		info.nullable = true
-		info.minWidth = 0
+		info.Nullable = true
+		info.MinWidth = 0
 	}
 
 	return info
 }
 
 func buildAlternativeIR(alts []*structuredMatcher) structuredIRInfo {
-	info := structuredIRInfo{nullable: false}
+	info := structuredIRInfo{Nullable: false}
 	if len(alts) == 0 {
-		info.nullable = true
-		info.firstLiteralExact = true
-		info.lastLiteralExact = true
+		info.Nullable = true
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
 		return info
 	}
 
@@ -335,34 +317,34 @@ func buildAlternativeIR(alts []*structuredMatcher) structuredIRInfo {
 
 	for i, alt := range alts {
 		altInfo := alt.ir
-		if i == 0 || altInfo.minWidth < minWidth {
-			minWidth = altInfo.minWidth
+		if i == 0 || altInfo.MinWidth < minWidth {
+			minWidth = altInfo.MinWidth
 		}
-		nullable = nullable || altInfo.nullable
+		nullable = nullable || altInfo.Nullable
 
 		if i == 0 {
-			firstLiteral = altInfo.firstLiteral
-			firstExact = altInfo.firstLiteralExact
-			lastLiteral = altInfo.lastLiteral
-			lastExact = altInfo.lastLiteralExact
+			firstLiteral = altInfo.FirstLiteral
+			firstExact = altInfo.FirstLiteralExact
+			lastLiteral = altInfo.LastLiteral
+			lastExact = altInfo.LastLiteralExact
 			continue
 		}
-		if firstLiteral != altInfo.firstLiteral || !altInfo.firstLiteralExact {
+		if firstLiteral != altInfo.FirstLiteral || !altInfo.FirstLiteralExact {
 			firstLiteral = ""
 			firstExact = false
 		}
-		if lastLiteral != altInfo.lastLiteral || !altInfo.lastLiteralExact {
+		if lastLiteral != altInfo.LastLiteral || !altInfo.LastLiteralExact {
 			lastLiteral = ""
 			lastExact = false
 		}
 	}
 
-	info.minWidth = minWidth
-	info.nullable = nullable
-	info.firstLiteral = firstLiteral
-	info.firstLiteralExact = firstExact && firstLiteral != ""
-	info.lastLiteral = lastLiteral
-	info.lastLiteralExact = lastExact && lastLiteral != ""
+	info.MinWidth = minWidth
+	info.Nullable = nullable
+	info.FirstLiteral = firstLiteral
+	info.FirstLiteralExact = firstExact && firstLiteral != ""
+	info.LastLiteral = lastLiteral
+	info.LastLiteralExact = lastExact && lastLiteral != ""
 	return info
 }
 
@@ -371,56 +353,7 @@ func matcherBoundaryLiteral(steps []structuredStep, forward bool) (string, bool)
 	for i := range steps {
 		parts = append(parts, steps[i].ir)
 	}
-	return irBoundaryLiteral(parts, forward)
-}
-
-func irBoundaryLiteral(parts []structuredIRInfo, forward bool) (string, bool) {
-	var candidate string
-	haveCandidate := false
-
-	if forward {
-		for i := 0; i < len(parts); i++ {
-			stepInfo := parts[i]
-			if stepInfo.firstLiteral != "" && stepInfo.firstLiteralExact {
-				if !haveCandidate {
-					candidate = stepInfo.firstLiteral
-					haveCandidate = true
-				} else if candidate != stepInfo.firstLiteral {
-					return "", false
-				}
-			} else if stepInfo.nullable {
-				return "", false
-			}
-			if !stepInfo.nullable {
-				if haveCandidate {
-					return candidate, true
-				}
-				return "", false
-			}
-		}
-		return "", false
-	}
-
-	for i := len(parts) - 1; i >= 0; i-- {
-		stepInfo := parts[i]
-		if stepInfo.lastLiteral != "" && stepInfo.lastLiteralExact {
-			if !haveCandidate {
-				candidate = stepInfo.lastLiteral
-				haveCandidate = true
-			} else if candidate != stepInfo.lastLiteral {
-				return "", false
-			}
-		} else if stepInfo.nullable {
-			return "", false
-		}
-		if !stepInfo.nullable {
-			if haveCandidate {
-				return candidate, true
-			}
-			return "", false
-		}
-	}
-	return "", false
+	return internalmatch.IRBoundaryLiteral(parts, forward)
 }
 
 func parserMinWidth(p *structuredParser) int {
@@ -528,10 +461,10 @@ func buildAlternativePrefixes(alts []*structuredMatcher) []string {
 
 	prefixes := make([]string, len(alts))
 	for i, alt := range alts {
-		if !alt.ir.firstLiteralExact || alt.ir.firstLiteral == "" {
+		if !alt.ir.FirstLiteralExact || alt.ir.FirstLiteral == "" {
 			return nil
 		}
-		prefixes[i] = alt.ir.firstLiteral
+		prefixes[i] = alt.ir.FirstLiteral
 	}
 
 	for i := range prefixes {
@@ -565,8 +498,8 @@ func isDeterministicOptionalStep(steps []structuredStep, idx int) bool {
 		return false
 	}
 	nextPrefix := ""
-	if steps[idx].nextIR.firstLiteralExact {
-		nextPrefix = steps[idx].nextIR.firstLiteral
+	if steps[idx].nextIR.FirstLiteralExact {
+		nextPrefix = steps[idx].nextIR.FirstLiteral
 	}
 	if nextPrefix == "" {
 		return false
@@ -1288,7 +1221,7 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 	appendRepeatedLiteral := func(ch byte, allowEmpty bool) {
 		flushLiteral()
 		class := &asciiCharClass{}
-		class.table[ch] = true
+		class.Table[ch] = true
 		steps = append(steps, structuredStep{
 			captureIndex: -1,
 			parser: &structuredParser{
@@ -1464,19 +1397,19 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 			case 'w':
 				for b := 0; b < 256; b++ {
 					if isWordByte(byte(b)) {
-						class.table[b] = true
+						class.Table[b] = true
 					}
 				}
 			case 'd':
 				for ch := byte('0'); ch <= '9'; ch++ {
-					class.table[ch] = true
+					class.Table[ch] = true
 				}
 			case 's':
 				for _, ch := range []byte{' ', '\t', '\r', '\n', '\f', '\v'} {
-					class.table[ch] = true
+					class.Table[ch] = true
 				}
 			default:
-				class.table[spec[i]] = true
+				class.Table[spec[i]] = true
 			}
 			continue
 		}
@@ -1486,12 +1419,12 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 				return nil, false
 			}
 			for ch := c; ch <= end; ch++ {
-				class.table[ch] = true
+				class.Table[ch] = true
 			}
 			i += 2
 			continue
 		}
-		class.table[c] = true
+		class.Table[c] = true
 	}
 	return class, true
 }
@@ -1539,9 +1472,9 @@ func firstStructuredLiteral(step structuredStep) (string, bool) {
 	case step.literal != "":
 		return step.literal, true
 	case step.submatcher != nil:
-		return step.submatcher.ir.firstLiteral, step.submatcher.ir.firstLiteralExact && step.submatcher.ir.firstLiteral != ""
+		return step.submatcher.ir.FirstLiteral, step.submatcher.ir.FirstLiteralExact && step.submatcher.ir.FirstLiteral != ""
 	case len(step.alternatives) > 0:
-		return step.ir.firstLiteral, step.ir.firstLiteralExact && step.ir.firstLiteral != ""
+		return step.ir.FirstLiteral, step.ir.FirstLiteralExact && step.ir.FirstLiteral != ""
 	case step.parser != nil && step.parser.wrapPrefix != "":
 		return step.parser.wrapPrefix, true
 	default:
@@ -1553,6 +1486,12 @@ func (m structuredMatcher) match(dst []string, content string, trimSpace bool) b
 	if m.anchoredStart || m.prefersStartOnly() {
 		return m.matchTopAt(dst, content, 0, trimSpace)
 	}
+	if m.hasStartOnlyRunner() {
+		resetStringResults(dst)
+		if m.matchTopAt(dst, content, 0, trimSpace) {
+			return true
+		}
+	}
 	return m.matchSearch(dst, content, trimSpace)
 }
 
@@ -1560,7 +1499,22 @@ func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool,
 	if m.anchoredStart || m.prefersStartOnly() {
 		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
 	}
+	if m.hasStartOnlyRunner() {
+		resetAnyResults(dst)
+		if m.matchTypedTopAt(dst, content, 0, trimSpace, kinds) {
+			return true
+		}
+	}
 	return m.matchTypedSearch(dst, content, trimSpace, kinds)
+}
+
+func (m structuredMatcher) hasStartOnlyRunner() bool {
+	return m.accessRunner != nil ||
+		m.commonRunner != nil ||
+		m.jenkinsRunner != nil ||
+		m.tomcatRunner != nil ||
+		m.rabbitRunner != nil ||
+		m.solrRunner != nil
 }
 
 func (m structuredMatcher) prefersStartOnly() bool {
@@ -1583,15 +1537,55 @@ func (m structuredMatcher) prefersStartOnly() bool {
 }
 
 func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, trimSpace bool) bool {
+	if pos == 0 && m.accessRunner != nil {
+		if m.accessRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.commonRunner != nil {
+		if m.commonRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.jenkinsRunner != nil {
+		if m.jenkinsRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.tomcatRunner != nil {
+		if m.tomcatRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.rabbitRunner != nil {
+		if m.rabbitRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
+	if pos == 0 && m.solrRunner != nil {
+		if m.solrRunner.run(dst, content, trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+	}
 	if m.quickReject(content, pos) {
 		return false
+	}
+	if pos == 0 && m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.run(dst, content, trimSpace)
+		return ok && next >= 0
 	}
 	if !m.backtracking && !m.changeLog {
 		next, ok := m.matchLinearFrom(dst, content, pos, trimSpace)
 		return ok && next >= 0
 	}
 
-	var smallChanges [8]matchChange
+	var smallChanges [16]matchChange
 	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
@@ -1612,15 +1606,55 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 }
 
 func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) bool {
+	if pos == 0 && m.accessRunner != nil {
+		if m.accessRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.commonRunner != nil {
+		if m.commonRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.jenkinsRunner != nil {
+		if m.jenkinsRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.tomcatRunner != nil {
+		if m.tomcatRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.rabbitRunner != nil {
+		if m.rabbitRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
+	if pos == 0 && m.solrRunner != nil {
+		if m.solrRunner.runTyped(dst, content, trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+	}
 	if m.quickReject(content, pos) {
 		return false
+	}
+	if pos == 0 && m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.runTyped(dst, content, trimSpace, kinds)
+		return ok && next >= 0
 	}
 	if !m.backtracking && !m.changeLog {
 		next, ok := m.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
 		return ok && next >= 0
 	}
 
-	var smallChanges [10]typedMatchChange
+	var smallChanges [16]typedMatchChange
 	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
@@ -1646,7 +1680,7 @@ func (m structuredMatcher) matchSearch(dst []string, content string, trimSpace b
 		if m.matchTopAt(dst, content, pos, trimSpace) {
 			return true
 		}
-		if len(content)-pos < m.ir.minWidth {
+		if len(content)-pos < m.ir.MinWidth {
 			break
 		}
 	}
@@ -1659,7 +1693,7 @@ func (m structuredMatcher) matchTypedSearch(dst []any, content string, trimSpace
 		if m.matchTypedTopAt(dst, content, pos, trimSpace, kinds) {
 			return true
 		}
-		if len(content)-pos < m.ir.minWidth {
+		if len(content)-pos < m.ir.MinWidth {
 			break
 		}
 	}
@@ -1668,8 +1702,8 @@ func (m structuredMatcher) matchTypedSearch(dst []any, content string, trimSpace
 
 func (m structuredMatcher) nextSearchPos(content string, pos int) int {
 	if pos <= 0 {
-		if m.ir.firstLiteralExact && m.ir.firstLiteral != "" {
-			idx := strings.Index(content, m.ir.firstLiteral)
+		if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" {
+			idx := strings.Index(content, m.ir.FirstLiteral)
 			if idx < 0 {
 				return len(content) + 1
 			}
@@ -1680,8 +1714,8 @@ func (m structuredMatcher) nextSearchPos(content string, pos int) int {
 	if pos > len(content) {
 		return len(content) + 1
 	}
-	if m.ir.firstLiteralExact && m.ir.firstLiteral != "" {
-		idx := strings.Index(content[pos:], m.ir.firstLiteral)
+	if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" {
+		idx := strings.Index(content[pos:], m.ir.FirstLiteral)
 		if idx < 0 {
 			return len(content) + 1
 		}
@@ -2417,16 +2451,16 @@ func matchingAlternatives(step structuredStep, content string, pos int) []*struc
 }
 
 func (m structuredMatcher) quickReject(content string, pos int) bool {
-	if len(content)-pos < m.ir.minWidth {
+	if len(content)-pos < m.ir.MinWidth {
 		return true
 	}
 	if m.requiresStartWordBoundary(content, pos) {
 		return true
 	}
-	if m.ir.firstLiteralExact && m.ir.firstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.firstLiteral) {
+	if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.FirstLiteral) {
 		return true
 	}
-	return m.anchoredStart && requiredLiteralRejects(content[pos:], m.ir.firstLiteral, m.required)
+	return m.anchoredStart && requiredLiteralRejects(content[pos:], m.ir.FirstLiteral, m.required)
 }
 
 func (m structuredMatcher) requiresStartWordBoundary(content string, pos int) bool {
@@ -2492,6 +2526,26 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 	if p.wrapPrefix != "" || p.wrapSuffix != "" {
 		return p.consumeWrapped(content, pos)
 	}
+	if p.kind == structuredIPOrHost {
+		if seg, next, ok := sliceIPv4Literal(content, pos); ok {
+			return next, seg, true
+		}
+		if seg, next, ok := sliceIPv6Like(content, pos); ok {
+			return next, seg, true
+		}
+		seg, next, ok := sliceHostName(content, pos)
+		if !ok || !isHostnameMatchContext(content, pos, next, seg) {
+			return 0, "", false
+		}
+		return next, seg, true
+	}
+	if p.kind == structuredHostName {
+		seg, next, ok := sliceHostName(content, pos)
+		if !ok || !isHostnameMatchContext(content, pos, next, seg) {
+			return 0, "", false
+		}
+		return next, seg, true
+	}
 
 	segment, next, ok := p.slice(content, pos)
 	if !ok {
@@ -2500,18 +2554,15 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 
 	switch p.kind {
 	case structuredWord:
-		if !isApacheWord(segment) {
-			return 0, "", false
-		}
-	case structuredIPOrHost, structuredURIPath, structuredURIPathParam:
 		if segment == "" {
 			return 0, "", false
 		}
-		if p.kind == structuredIPOrHost && !isStructuredIPLiteral(segment) && !isHostnameMatchContext(content, pos, next, segment) {
+	case structuredURIPath, structuredURIPathParam:
+		if segment == "" {
 			return 0, "", false
 		}
-	case structuredHostName:
-		if segment == "" || !isHostnameMatchContext(content, pos, next, segment) {
+	case structuredHostName, structuredIPOrHost:
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredCharClass:
@@ -2519,7 +2570,7 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredNotSpace:
-		if segment == "" || strings.IndexAny(segment, " \t\r\n\f\v") >= 0 {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredNumber:
@@ -2599,11 +2650,11 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredTimestampISO8601:
-		if !looksLikeTimestampISO8601(segment) {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredHTTPDate:
-		if !looksLikeHTTPDate(segment) {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredLogLevel:
@@ -2855,7 +2906,7 @@ func sliceCharClass(content string, pos int, class *asciiCharClass, allowEmpty b
 		return "", 0, false
 	}
 	start := pos
-	for pos < len(content) && class.table[content[pos]] {
+	for pos < len(content) && class.Table[content[pos]] {
 		pos++
 	}
 	if pos == start && !allowEmpty {
@@ -2902,10 +2953,45 @@ func sliceHostName(content string, pos int) (string, int, bool) {
 }
 
 func sliceIPOrHost(content string, pos int) (string, int, bool) {
+	if seg, next, ok := sliceIPv4Literal(content, pos); ok {
+		return seg, next, true
+	}
 	if seg, next, ok := sliceIPv6Like(content, pos); ok {
 		return seg, next, true
 	}
 	return sliceHostName(content, pos)
+}
+
+func sliceIPv4Literal(content string, pos int) (string, int, bool) {
+	start := pos
+	for part := 0; part < 4; part++ {
+		if pos >= len(content) || !isASCIIDigit(content[pos]) {
+			return "", 0, false
+		}
+
+		val := 0
+		digits := 0
+		for pos < len(content) && isASCIIDigit(content[pos]) {
+			val = val*10 + int(content[pos]-'0')
+			digits++
+			if digits > 3 || val > 255 {
+				return "", 0, false
+			}
+			pos++
+		}
+		if part == 3 {
+			break
+		}
+		if pos >= len(content) || content[pos] != '.' {
+			return "", 0, false
+		}
+		pos++
+	}
+
+	if pos < len(content) && (isHostnameByte(content[pos]) || content[pos] == ':') {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
 }
 
 func sliceNotSpaceWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
@@ -3080,33 +3166,46 @@ func sliceTokenBeforeSpaceOrLiteral(content string, pos int, nextLiteral string,
 		return "", 0, false
 	}
 
-	searchEnd := len(content)
-	for {
-		rel := lastLiteralIndex(content[pos:searchEnd], nextLiteral)
-		if rel < 0 {
-			return "", 0, false
-		}
-		litPos := pos + rel
-		tokenEnd := litPos
-		for tokenEnd > pos && isRegexpASCIISpace(content[tokenEnd-1]) {
-			tokenEnd--
-		}
-		if tokenEnd <= pos {
-			searchEnd = litPos
-			continue
-		}
-		if strings.IndexAny(content[pos:tokenEnd], " \t\r\n\f\v") >= 0 {
-			searchEnd = litPos
-			continue
-		}
-		if !requireSpace && tokenEnd == litPos {
-			return content[pos:tokenEnd], tokenEnd, true
-		}
-		if isOnlyRegexpSpace(content[tokenEnd:litPos]) {
-			return content[pos:tokenEnd], tokenEnd, true
+	tokenEnd := pos
+	for tokenEnd < len(content) && !isRegexpASCIISpace(content[tokenEnd]) {
+		tokenEnd++
+	}
+
+	if tokenEnd == pos {
+		return "", 0, false
+	}
+
+	searchEnd := tokenEnd
+	if tokenEnd < len(content) {
+		litPos := tokenEnd
+		for litPos < len(content) && isRegexpASCIISpace(content[litPos]) {
+			litPos++
 		}
 		searchEnd = litPos
+		expected := nextLiteral
+		if litPos > tokenEnd {
+			for len(expected) > 0 && isRegexpASCIISpace(expected[0]) {
+				expected = expected[1:]
+			}
+		}
+		if expected != "" && strings.HasPrefix(content[litPos:], expected) {
+			if requireSpace && litPos == tokenEnd {
+				return "", 0, false
+			}
+			return content[pos:tokenEnd], tokenEnd, true
+		}
 	}
+
+	if requireSpace {
+		return "", 0, false
+	}
+
+	rel := lastLiteralIndex(content[pos:searchEnd], nextLiteral)
+	if rel <= 0 {
+		return "", 0, false
+	}
+	tokenEnd = pos + rel
+	return content[pos:tokenEnd], tokenEnd, true
 }
 
 func sliceUntilSpaceOrLiteral(content string, pos int, nextLiteral string) (string, int, bool) {
@@ -3324,20 +3423,8 @@ func isStructuredIPLiteral(s string) bool {
 	if strings.IndexByte(s, ':') >= 0 {
 		return true
 	}
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || len(part) > 3 {
-			return false
-		}
-		n, ok := parsePositiveInt(part)
-		if !ok || n > 255 {
-			return false
-		}
-	}
-	return true
+	_, _, ok := sliceIPv4Literal(s, 0)
+	return ok
 }
 
 func isHostnameMatchContext(content string, start int, end int, segment string) bool {
@@ -3345,6 +3432,9 @@ func isHostnameMatchContext(content string, start int, end int, segment string) 
 		return false
 	}
 	if strings.HasSuffix(segment, ".") {
+		return true
+	}
+	if end >= len(content) || !isWordByte(content[end]) {
 		return true
 	}
 	return hasRegexpWordBoundary(content, end)

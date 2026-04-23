@@ -23,11 +23,13 @@ type SubMatchName struct {
 type GrokRegexp struct {
 	grokPattern   *GrokPattern
 	re            *regexp.Regexp
+	filter        *regexpFilter
 	subMatchNames SubMatchName
 	nameIndex     map[string]int
 	valueKinds    []valueKind
 	fastMatcher   *structuredMatcher
 	prefilter     *regexpPrefilter
+	multiFilter   multiPatternFilter
 }
 
 type valueKind uint8
@@ -169,7 +171,13 @@ func (g *GrokRegexp) matchIndexes(content string) ([]int, error) {
 	if g.re == nil {
 		return nil, ErrNotCompiled
 	}
+	if g.multiFilter != nil && !g.multiFilter.MatchString(content) {
+		return nil, ErrMismatch
+	}
 	if g.prefilter != nil && g.prefilter.rejects(content) {
+		return nil, ErrMismatch
+	}
+	if g.filter != nil && !g.filter.re.MatchString(content) {
 		return nil, ErrMismatch
 	}
 

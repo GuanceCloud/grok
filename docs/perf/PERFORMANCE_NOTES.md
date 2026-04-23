@@ -81,6 +81,33 @@ Suggested shape:
 - run a dispatcher before `Run`/`RunWithTypeInfo` to narrow candidates
 - keep the final semantic engine unchanged: structured matcher first, fallback regexp second
 
+Concrete draft:
+
+- compile each pattern into a small `patternAtomProfile`:
+  - `anchoredPrefix`
+  - `exactLiterals`
+  - `requiredAtoms`
+  - `minWidth`
+  - `hasStructuredFastPath`
+- build one shared `atomDispatcher` for a pattern family:
+  - `prefixBuckets map[string][]int`
+  - `exactBuckets map[int]map[string][]int`
+  - `atomPostings map[string][]int`
+  - `fallback []int` for patterns with weak extraction
+- dispatch in two stages:
+  - stage 1: cheap rejects from prefix / exact-length buckets
+  - stage 2: ordered-atom check to produce a small candidate list
+- run the existing engines only for the remaining candidates:
+  - `fastMatcher` first when present
+  - current `regexp` path second
+
+Guardrails for implementation:
+
+- do not change capture semantics inside the dispatcher
+- preserve current single-pattern APIs and add the dispatcher as an opt-in multi-pattern layer
+- measure candidate-count reduction, not just wall-clock time
+- fuzz against the current per-pattern execution path before enabling it by default
+
 ### 2. Dissect-style delimiter parser plus grok hybrid
 
 Introduce a delimiter-oriented parser for stable log skeletons, then hand the irregular tail or subfields to grok only where regex power is actually needed.
