@@ -11,8 +11,8 @@ const (
 )
 
 const (
-	elasticDefaultPattern = `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[%{NOTSPACE:name}%{SPACE}\]%{SPACE}(\[%{HOSTNAME:nodeId}\])?.*`
-	elasticSearchSlowPattern = `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[i.s.s.(query|fetch)%{SPACE}\] (\[%{HOSTNAME:nodeId}\] )?\[%{NOTSPACE:index}\]\[%{INT}\] took\[.*\], took_millis\[%{INT:duration}\].*`
+	elasticDefaultPattern    = `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[%{NOTSPACE:name}%{SPACE}\]%{SPACE}(\[%{HOSTNAME:nodeId}\])?.*`
+	elasticSearchSlowPattern = `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}%{SPACE}\]\[i.s.s.(?:query|fetch)%{SPACE}\] (?:\[%{HOSTNAME:nodeId}\] )?\[%{NOTSPACE:index}\]\[%{INT}\] took\[.*\], took_millis\[%{INT:duration}\].*`
 )
 
 type elasticDefaultRunner struct {
@@ -239,12 +239,12 @@ func consumeBracketValue(content string, pos int) (string, int, bool) {
 }
 
 type elasticRunner struct {
-	kind       elasticRunnerKind
-	timeIdx    int
-	statusIdx  int
-	nameIdx    int
-	nodeIDIdx  int
-	indexIdx   int
+	kind        elasticRunnerKind
+	timeIdx     int
+	statusIdx   int
+	nameIdx     int
+	nodeIDIdx   int
+	indexIdx    int
 	durationIdx int
 }
 
@@ -446,24 +446,21 @@ const (
 )
 
 type nginxErrorRunner struct {
-	kind         nginxErrorRunnerKind
-	timeIdx      int
-	statusIdx    int
-	msgIdx       int
-	clientIdx    int
-	serverIdx    int
-	methodIdx    int
-	urlIdx       int
-	versionIdx   int
-	upstreamIdx  int
-	hostIdx      int
+	kind        nginxErrorRunnerKind
+	timeIdx     int
+	statusIdx   int
+	msgIdx      int
+	clientIdx   int
+	serverIdx   int
+	methodIdx   int
+	urlIdx      int
+	versionIdx  int
+	upstreamIdx int
+	hostIdx     int
 }
 
 func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxErrorRunner, bool) {
 	if nameIndex == nil || !strings.Contains(pattern, `%{date2:time}`) || !strings.Contains(pattern, `%{LOGLEVEL:status}`) {
-		return nil, false
-	}
-	if !strings.Contains(pattern, `client: %{NOTSPACE:client_ip}`) {
 		return nil, false
 	}
 	r := &nginxErrorRunner{timeIdx: -1, statusIdx: -1, msgIdx: -1, clientIdx: -1, serverIdx: -1, methodIdx: -1, urlIdx: -1, versionIdx: -1, upstreamIdx: -1, hostIdx: -1}
@@ -477,22 +474,22 @@ func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxEr
 	if r.msgIdx, ok = nameIndex["msg"]; !ok {
 		return nil, false
 	}
-	r.clientIdx = nameIndex["client_ip"]
-	r.serverIdx = nameIndex["server"]
-	r.methodIdx = nameIndex["http_method"]
-	r.urlIdx = nameIndex["http_url"]
-	r.versionIdx = nameIndex["http_version"]
-	r.upstreamIdx = nameIndex["upstream"]
-	r.hostIdx = nameIndex["ip_or_host"]
+	r.clientIdx = lookupNameIndex(nameIndex, "client_ip")
+	r.serverIdx = lookupNameIndex(nameIndex, "server")
+	r.methodIdx = lookupNameIndex(nameIndex, "http_method")
+	r.urlIdx = lookupNameIndex(nameIndex, "http_url")
+	r.versionIdx = lookupNameIndex(nameIndex, "http_version")
+	r.upstreamIdx = lookupNameIndex(nameIndex, "upstream")
+	r.hostIdx = lookupNameIndex(nameIndex, "ip_or_host")
 	switch {
+	case pattern == `%{date2:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`:
+		r.kind = nginxErrorBare
 	case strings.Contains(pattern, `client: %{NOTSPACE:client_ip}`):
 		if strings.Contains(pattern, `upstream: \"%{GREEDYDATA:upstream}\"`) {
 			r.kind = nginxErrorDetailed
 		} else {
 			r.kind = nginxErrorSimple
 		}
-	case pattern == `%{date2:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`:
-		r.kind = nginxErrorBare
 	default:
 		return nil, false
 	}
@@ -631,11 +628,11 @@ func consumeSlashDateTime(s string, start int) (int, bool) {
 		return 0, false
 	}
 	i++
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || s[i] != sep {
+	if !consumeTwoDigitRange(s, &i, 1, 12, true) || i >= len(s) || s[i] != sep {
 		return 0, false
 	}
 	i++
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || s[i] != ' ' {
+	if !consumeTwoDigitRange(s, &i, 1, 31, true) || i >= len(s) || s[i] != ' ' {
 		return 0, false
 	}
 	i++

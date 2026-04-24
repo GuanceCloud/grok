@@ -4,35 +4,38 @@ import (
 	internalmatch "github.com/GuanceCloud/grok/internal/match"
 	"net"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
 type structuredMatcher struct {
-	steps          []structuredStep
-	ir             structuredIRInfo
-	required       []string
-	anchoredStart  bool
-	anchoredRunner *anchoredDissectRunner
-	accessRunner   *accessLogRunner
-	commonRunner   *commonApacheRunner
-	jenkinsRunner  *jenkinsRunner
-	tomcatRunner   *tomcatCatalinaRunner
-	mysqlRunner    *mysqlSimpleRunner
-	sqlserverRunner *sqlServerRunner
-	kafkaRunner    *kafkaBracketRunner
-	kingbaseRunner *kingbaseRunner
-	redisRunner    *redisRunner
-	damengRunner   *damengRunner
-	elasticRunner  *elasticRunner
+	steps                []structuredStep
+	ir                   structuredIRInfo
+	required             []string
+	anchoredStart        bool
+	anchoredRunner       *anchoredDissectRunner
+	accessRunner         *accessLogRunner
+	commonRunner         *commonApacheRunner
+	jenkinsRunner        *jenkinsRunner
+	tomcatRunner         *tomcatCatalinaRunner
+	mysqlRunner          *mysqlSimpleRunner
+	sqlserverRunner      *sqlServerRunner
+	kafkaRunner          *kafkaBracketRunner
+	kingbaseRunner       *kingbaseRunner
+	redisRunner          *redisRunner
+	damengRunner         *damengRunner
+	elasticRunner        *elasticRunner
 	elasticDefaultRunner *elasticDefaultRunner
-	elasticSearchRunner *elasticSearchSlowRunner
-	nginxErrorRunner *nginxErrorRunner
-	rabbitRunner   *rabbitMQRunner
-	solrRunner     *solrRunner
-	writes         bool
-	backtracking   bool
-	changeLog      bool
-	changeCap      int
+	elasticSearchRunner  *elasticSearchSlowRunner
+	nginxErrorRunner     *nginxErrorRunner
+	rabbitRunner         *rabbitMQRunner
+	solrRunner           *solrRunner
+	startOnlyRunner      bool
+	writes               bool
+	backtracking         bool
+	changeLog            bool
+	changeCap            int
+	riskySearch          bool
 }
 
 type matchChange struct {
@@ -43,6 +46,26 @@ type matchChange struct {
 type typedMatchChange struct {
 	idx  int
 	prev any
+}
+
+type matchChangeBuffer struct {
+	changes []matchChange
+}
+
+type typedMatchChangeBuffer struct {
+	changes []typedMatchChange
+}
+
+var matchChangePool = sync.Pool{
+	New: func() any {
+		return &matchChangeBuffer{changes: make([]matchChange, 0, 16)}
+	},
+}
+
+var typedMatchChangePool = sync.Pool{
+	New: func() any {
+		return &typedMatchChangeBuffer{changes: make([]typedMatchChange, 0, 16)}
+	},
 }
 
 type structuredStep struct {
@@ -56,6 +79,7 @@ type structuredStep struct {
 	optPrefix             string
 	optPrefixSkips        bool
 	deterministicOptional bool
+	parserBacktracking    bool
 	tailMinWidth          int
 	ir                    structuredIRInfo
 	nextIR                structuredIRInfo
@@ -144,7 +168,7 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 		changeLog:     matcherNeedsChangeLog(steps),
 		changeCap:     matcherChangeCapacity(steps),
 	}
-	matcher.anchoredRunner, _ = compileAnchoredDissectRunner(steps, matcher.anchoredStart)
+	matcher.anchoredRunner, _ = compileAnchoredDissectRunner(steps, true)
 	matcher.accessRunner, _ = compileAccessRunner(steps)
 	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex)
 	matcher.jenkinsRunner, _ = compileJenkinsRunner(pattern, meta.nameIndex)
@@ -161,7 +185,56 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	matcher.nginxErrorRunner, _ = compileNginxErrorRunner(pattern, meta.nameIndex)
 	matcher.rabbitRunner, _ = compileRabbitMQRunner(pattern, steps)
 	matcher.solrRunner, _ = compileSolrRunner(pattern, steps)
+	matcher.startOnlyRunner = matcher.hasConcreteStartOnlyRunner()
+	matcher.riskySearch = shouldLimitUnanchoredSearchMatcher(matcher)
+	if matcher.riskySearch && shouldDisableSmallRiskySearchMatcher(matcher) {
+		return nil
+	}
 	return &matcher
+}
+
+func getMatchChangeBuffer(capHint int) *matchChangeBuffer {
+	buf := matchChangePool.Get().(*matchChangeBuffer)
+	if capHint < 16 {
+		capHint = 16
+	}
+	if cap(buf.changes) < capHint {
+		buf.changes = make([]matchChange, 0, capHint)
+	} else {
+		buf.changes = buf.changes[:0]
+	}
+	return buf
+}
+
+func putMatchChangeBuffer(buf *matchChangeBuffer, changes []matchChange) {
+	if cap(changes) > 256 {
+		buf.changes = make([]matchChange, 0, 16)
+	} else {
+		buf.changes = changes[:0]
+	}
+	matchChangePool.Put(buf)
+}
+
+func getTypedMatchChangeBuffer(capHint int) *typedMatchChangeBuffer {
+	buf := typedMatchChangePool.Get().(*typedMatchChangeBuffer)
+	if capHint < 16 {
+		capHint = 16
+	}
+	if cap(buf.changes) < capHint {
+		buf.changes = make([]typedMatchChange, 0, capHint)
+	} else {
+		buf.changes = buf.changes[:0]
+	}
+	return buf
+}
+
+func putTypedMatchChangeBuffer(buf *typedMatchChangeBuffer, changes []typedMatchChange) {
+	if cap(changes) > 256 {
+		buf.changes = make([]typedMatchChange, 0, 16)
+	} else {
+		buf.changes = changes[:0]
+	}
+	typedMatchChangePool.Put(buf)
 }
 
 func compactStructuredSteps(steps []structuredStep) []structuredStep {
@@ -258,6 +331,10 @@ func configureStructuredSteps(steps []structuredStep) {
 			}
 			steps[i].deterministicOptional = isDeterministicOptionalStep(steps, i)
 		}
+	}
+
+	for i := range steps {
+		steps[i].parserBacktracking = parserStepNeedsBacktracking(steps, i)
 	}
 }
 
@@ -550,7 +627,7 @@ func matcherWrites(steps []structuredStep) bool {
 
 func matcherNeedsBacktracking(steps []structuredStep) bool {
 	for i := range steps {
-		if parserNeedsBacktracking(steps[i]) {
+		if steps[i].parserBacktracking {
 			return true
 		}
 		if steps[i].optional && !isDeterministicOptionalStep(steps, i) && !optionalStepCanCommitLinearly(steps, i) {
@@ -571,7 +648,7 @@ func matcherNeedsBacktracking(steps []structuredStep) bool {
 func matcherNeedsChangeLog(steps []structuredStep) bool {
 	for i := range steps {
 		step := steps[i]
-		if parserNeedsBacktracking(step) && step.parser.dstIndex >= 0 {
+		if step.parserBacktracking && step.parser.dstIndex >= 0 {
 			return true
 		}
 		if step.optional && !isDeterministicOptionalStep(steps, i) && !optionalStepCanCommitLinearly(steps, i) {
@@ -598,6 +675,37 @@ func parserNeedsBacktracking(step structuredStep) bool {
 	return step.parser != nil && step.parser.nextLiteral != "" &&
 		(step.parser.kind == structuredGreedyUntilLiteral ||
 			(step.parser.kind == structuredNotSpace && !step.parser.hasNextParser && !literalStartsWithRegexpSpace(step.parser.nextLiteral)))
+}
+
+func parserStepNeedsBacktracking(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx >= len(steps) || !parserNeedsBacktracking(steps[idx]) {
+		return false
+	}
+	step := steps[idx]
+	if step.optional && step.deterministicOptional && step.parser != nil && step.parser.wrapSuffix != "" {
+		return false
+	}
+	return !backtrackingParserCanCommitLinearly(steps, idx)
+}
+
+func backtrackingParserCanCommitLinearly(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx+1 >= len(steps) {
+		return false
+	}
+	step := steps[idx]
+	if step.optional || step.parser == nil || step.parser.nextLiteral == "" {
+		return false
+	}
+	if idx+2 != len(steps) {
+		return false
+	}
+	next := steps[idx+1]
+	return !next.optional &&
+		next.literal == step.parser.nextLiteral &&
+		next.captureIndex < 0 &&
+		next.parser == nil &&
+		next.submatcher == nil &&
+		len(next.alternatives) == 0
 }
 
 func optionalStepCanCommitLinearly(steps []structuredStep, idx int) bool {
@@ -696,6 +804,39 @@ func shouldUseStructuredMatcher(steps []structuredStep) bool {
 		return false
 	}
 	return true
+}
+
+func shouldLimitUnanchoredSearchMatcher(matcher structuredMatcher) bool {
+	if matcher.anchoredStart || matcher.hasStartOnlyRunner() {
+		return false
+	}
+	if matcher.ir.FirstLiteralExact && matcher.ir.FirstLiteral != "" {
+		return false
+	}
+	return matcher.backtracking && matcher.changeLog && hasWritableOptionalStep(matcher.steps)
+}
+
+func hasWritableOptionalStep(steps []structuredStep) bool {
+	for i := range steps {
+		step := steps[i]
+		if step.optional && step.writes {
+			return true
+		}
+		if step.submatcher != nil && hasWritableOptionalStep(step.submatcher.steps) {
+			return true
+		}
+		for _, alt := range step.alternatives {
+			if hasWritableOptionalStep(alt.steps) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shouldDisableSmallRiskySearchMatcher(matcher structuredMatcher) bool {
+	stats := collectStructuredStats(matcher.steps)
+	return stats.parserCount <= 5 && stats.submatcherCount <= 1 && stats.alternativeCount == 0
 }
 
 type structuredStats struct {
@@ -1506,6 +1647,10 @@ func (m structuredMatcher) match(dst []string, content string, trimSpace bool) b
 	if m.anchoredStart || m.prefersStartOnly() {
 		return m.matchTopAt(dst, content, 0, trimSpace)
 	}
+	if m.riskySearch {
+		resetStringResults(dst)
+		return m.matchTopAt(dst, content, 0, trimSpace)
+	}
 	if m.hasStartOnlyRunner() {
 		resetStringResults(dst)
 		if m.matchTopAt(dst, content, 0, trimSpace) {
@@ -1519,6 +1664,10 @@ func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool,
 	if m.anchoredStart || m.prefersStartOnly() {
 		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
 	}
+	if m.riskySearch {
+		resetAnyResults(dst)
+		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
+	}
 	if m.hasStartOnlyRunner() {
 		resetAnyResults(dst)
 		if m.matchTypedTopAt(dst, content, 0, trimSpace, kinds) {
@@ -1529,6 +1678,10 @@ func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool,
 }
 
 func (m structuredMatcher) hasStartOnlyRunner() bool {
+	return m.startOnlyRunner
+}
+
+func (m structuredMatcher) hasConcreteStartOnlyRunner() bool {
 	return m.accessRunner != nil ||
 		m.commonRunner != nil ||
 		m.jenkinsRunner != nil ||
@@ -1567,107 +1720,109 @@ func (m structuredMatcher) prefersStartOnly() bool {
 }
 
 func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, trimSpace bool) bool {
-	if pos == 0 && m.accessRunner != nil {
-		if m.accessRunner.run(dst, content, trimSpace) {
-			return true
+	if pos == 0 && m.startOnlyRunner {
+		if pos == 0 && m.accessRunner != nil {
+			if m.accessRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.commonRunner != nil {
-		if m.commonRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.commonRunner != nil {
+			if m.commonRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.jenkinsRunner != nil {
-		if m.jenkinsRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.jenkinsRunner != nil {
+			if m.jenkinsRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.tomcatRunner != nil {
-		if m.tomcatRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.tomcatRunner != nil {
+			if m.tomcatRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.mysqlRunner != nil {
-		if m.mysqlRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.mysqlRunner != nil {
+			if m.mysqlRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.sqlserverRunner != nil {
-		if m.sqlserverRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.sqlserverRunner != nil {
+			if m.sqlserverRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.kafkaRunner != nil {
-		if m.kafkaRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.kafkaRunner != nil {
+			if m.kafkaRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.kingbaseRunner != nil {
-		if m.kingbaseRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.kingbaseRunner != nil {
+			if m.kingbaseRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.redisRunner != nil {
-		if m.redisRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.redisRunner != nil {
+			if m.redisRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.damengRunner != nil {
-		if m.damengRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.damengRunner != nil {
+			if m.damengRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.elasticRunner != nil {
-		if m.elasticRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.elasticRunner != nil {
+			if m.elasticRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.elasticDefaultRunner != nil {
-		if m.elasticDefaultRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.elasticDefaultRunner != nil {
+			if m.elasticDefaultRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.elasticSearchRunner != nil {
-		if m.elasticSearchRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.elasticSearchRunner != nil {
+			if m.elasticSearchRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.nginxErrorRunner != nil {
-		if m.nginxErrorRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.nginxErrorRunner != nil {
+			if m.nginxErrorRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.rabbitRunner != nil {
-		if m.rabbitRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.rabbitRunner != nil {
+			if m.rabbitRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
-	}
-	if pos == 0 && m.solrRunner != nil {
-		if m.solrRunner.run(dst, content, trimSpace) {
-			return true
+		if pos == 0 && m.solrRunner != nil {
+			if m.solrRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
 		}
-		resetStringResults(dst)
 	}
 	if m.quickReject(content, pos) {
 		return false
 	}
-	if pos == 0 && m.anchoredRunner != nil {
-		next, ok := m.anchoredRunner.run(dst, content, trimSpace)
+	if m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.runAt(dst, content, pos, trimSpace)
 		return ok && next >= 0
 	}
 	if !m.backtracking && !m.changeLog {
@@ -1675,128 +1830,128 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 		return ok && next >= 0
 	}
 
-	var smallChanges [16]matchChange
-	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
 		changeCap = m.changeCap
 	}
-	if changeCap > len(smallChanges) {
-		changes = make([]matchChange, 0, changeCap)
-	}
+	changeBuf := getMatchChangeBuffer(changeCap)
+	changes := changeBuf.changes
 
 	var next int
 	var ok bool
 	if m.backtracking {
-		next, ok, _ = m.matchBacktrackingFrom(dst, content, pos, trimSpace, changes)
+		next, ok, changes = m.matchBacktrackingFrom(dst, content, pos, trimSpace, changes)
 	} else {
-		next, ok, _ = m.matchFrom(dst, content, pos, trimSpace, changes)
+		next, ok, changes = m.matchFrom(dst, content, pos, trimSpace, changes)
 	}
+	putMatchChangeBuffer(changeBuf, changes)
 	return ok && next >= 0
 }
 
 func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) bool {
-	if pos == 0 && m.accessRunner != nil {
-		if m.accessRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+	if pos == 0 && m.startOnlyRunner {
+		if pos == 0 && m.accessRunner != nil {
+			if m.accessRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.commonRunner != nil {
-		if m.commonRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.commonRunner != nil {
+			if m.commonRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.jenkinsRunner != nil {
-		if m.jenkinsRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.jenkinsRunner != nil {
+			if m.jenkinsRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.tomcatRunner != nil {
-		if m.tomcatRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.tomcatRunner != nil {
+			if m.tomcatRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.mysqlRunner != nil {
-		if m.mysqlRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.mysqlRunner != nil {
+			if m.mysqlRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.sqlserverRunner != nil {
-		if m.sqlserverRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.sqlserverRunner != nil {
+			if m.sqlserverRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.kafkaRunner != nil {
-		if m.kafkaRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.kafkaRunner != nil {
+			if m.kafkaRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.kingbaseRunner != nil {
-		if m.kingbaseRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.kingbaseRunner != nil {
+			if m.kingbaseRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.redisRunner != nil {
-		if m.redisRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.redisRunner != nil {
+			if m.redisRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.damengRunner != nil {
-		if m.damengRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.damengRunner != nil {
+			if m.damengRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.elasticRunner != nil {
-		if m.elasticRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.elasticRunner != nil {
+			if m.elasticRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.elasticDefaultRunner != nil {
-		if m.elasticDefaultRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.elasticDefaultRunner != nil {
+			if m.elasticDefaultRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.elasticSearchRunner != nil {
-		if m.elasticSearchRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.elasticSearchRunner != nil {
+			if m.elasticSearchRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.nginxErrorRunner != nil {
-		if m.nginxErrorRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.nginxErrorRunner != nil {
+			if m.nginxErrorRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.rabbitRunner != nil {
-		if m.rabbitRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.rabbitRunner != nil {
+			if m.rabbitRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
-	}
-	if pos == 0 && m.solrRunner != nil {
-		if m.solrRunner.runTyped(dst, content, trimSpace, kinds) {
-			return true
+		if pos == 0 && m.solrRunner != nil {
+			if m.solrRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
 		}
-		resetAnyResults(dst)
 	}
 	if m.quickReject(content, pos) {
 		return false
 	}
-	if pos == 0 && m.anchoredRunner != nil {
-		next, ok := m.anchoredRunner.runTyped(dst, content, trimSpace, kinds)
+	if m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.runTypedAt(dst, content, pos, trimSpace, kinds)
 		return ok && next >= 0
 	}
 	if !m.backtracking && !m.changeLog {
@@ -1804,23 +1959,21 @@ func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, t
 		return ok && next >= 0
 	}
 
-	var smallChanges [16]typedMatchChange
-	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
 		changeCap = m.changeCap
 	}
-	if changeCap > len(smallChanges) {
-		changes = make([]typedMatchChange, 0, changeCap)
-	}
+	changeBuf := getTypedMatchChangeBuffer(changeCap)
+	changes := changeBuf.changes
 
 	var next int
 	var ok bool
 	if m.backtracking {
-		next, ok, _ = m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+		next, ok, changes = m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
 	} else {
-		next, ok, _ = m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+		next, ok, changes = m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
 	}
+	putTypedMatchChangeBuffer(changeBuf, changes)
 	return ok && next >= 0
 }
 
@@ -2291,7 +2444,7 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 	}
 
 	step := steps[idx]
-	if step.parser != nil && parserNeedsBacktracking(step) {
+	if step.parserBacktracking {
 		return matchStructuredBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, changes)
 	}
 
@@ -2324,7 +2477,7 @@ func matchTypedStructuredSteps(steps []structuredStep, idx int, dst []any, conte
 	}
 
 	step := steps[idx]
-	if step.parser != nil && parserNeedsBacktracking(step) {
+	if step.parserBacktracking {
 		return matchTypedBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes)
 	}
 
@@ -2430,7 +2583,7 @@ func backtrackingParserSegmentOK(p *structuredParser, segment string) bool {
 	}
 	switch p.kind {
 	case structuredGreedyUntilLiteral:
-		return segment != "" || p.allowEmpty
+		return dotRunSegmentOK(p, segment)
 	case structuredNotSpace:
 		return segment != "" && strings.IndexAny(segment, " \t\r\n\f\v") < 0
 	default:
@@ -2784,7 +2937,7 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredUntilLiteral, structuredGreedyUntilLiteral:
-		if segment == "" && !p.allowEmpty {
+		if !dotRunSegmentOK(p, segment) {
 			return 0, "", false
 		}
 	case structuredSpaceOne:
@@ -2990,6 +3143,16 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 	}
 
 	return content[pos:], len(content), true
+}
+
+func dotRunSegmentOK(p *structuredParser, segment string) bool {
+	if p == nil {
+		return false
+	}
+	if segment == "" && !p.allowEmpty {
+		return false
+	}
+	return p.dotAll || strings.IndexByte(segment, '\n') < 0
 }
 
 func canParserEndWithoutLiteral(kind structuredKind) bool {

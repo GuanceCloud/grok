@@ -2,6 +2,7 @@ package grok
 
 import (
 	"fmt"
+	"math/bits"
 	"sort"
 	"strings"
 )
@@ -16,6 +17,7 @@ type MatcherSetPattern struct {
 type MatcherSet struct {
 	entries         []matcherSetEntry
 	linearMatchers  []*GrokRegexp
+	maxMatchCount   int
 	exact           map[string][]int
 	anchoredBuckets map[byte][]matcherSetBucket
 	atomScanner     *atomScanner
@@ -74,6 +76,9 @@ func NewMatcherSet(patterns []MatcherSetPattern) (*MatcherSet, error) {
 		}
 		ms.entries[i] = entry
 		ms.linearMatchers[i] = pattern.Matcher
+		if count := pattern.Matcher.matchCount(); count > ms.maxMatchCount {
+			ms.maxMatchCount = count
+		}
 
 		indexed := false
 		pf := entry.prefilter
@@ -125,6 +130,15 @@ func NewMatcherSet(patterns []MatcherSetPattern) (*MatcherSet, error) {
 	return ms, nil
 }
 
+// MatchCount returns the largest named-capture count across all matchers in the
+// set. Callers can use it to size reusable buffers passed to RunFirstTo.
+func (ms *MatcherSet) MatchCount() int {
+	if ms == nil {
+		return 0
+	}
+	return ms.maxMatchCount
+}
+
 // CandidateIDs returns the in-order matcher IDs that survive the shared prefilter.
 func (ms *MatcherSet) CandidateIDs(content string) []string {
 	indexes := ms.candidateIndexes(content)
@@ -137,7 +151,17 @@ func (ms *MatcherSet) CandidateIDs(content string) []string {
 
 // RunFirst returns the first in-order matcher that fully matches the content.
 func (ms *MatcherSet) RunFirst(content string, trimSpace bool) (string, []string, error) {
-	idx, ret, err := ms.runFirstIndex(content, trimSpace)
+	idx, ret, err := ms.runFirstIndexTo(content, trimSpace, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	return ms.entries[idx].id, ret, nil
+}
+
+// RunFirstTo returns the first in-order matcher that fully matches the content,
+// reusing dst when its capacity is large enough for the matched pattern.
+func (ms *MatcherSet) RunFirstTo(content string, trimSpace bool, dst []string) (string, []string, error) {
+	idx, ret, err := ms.runFirstIndexTo(content, trimSpace, dst)
 	if err != nil {
 		return "", nil, err
 	}
@@ -145,18 +169,25 @@ func (ms *MatcherSet) RunFirst(content string, trimSpace bool) (string, []string
 }
 
 func (ms *MatcherSet) runFirstIndex(content string, trimSpace bool) (int, []string, error) {
+	return ms.runFirstIndexTo(content, trimSpace, nil)
+}
+
+func (ms *MatcherSet) runFirstIndexTo(content string, trimSpace bool, dst []string) (int, []string, error) {
 	if len(ms.entries) == 0 {
 		return -1, nil, ErrMismatch
 	}
 	if ms.preferLinear {
-		return ms.runFirstLinear(content, trimSpace)
+		return ms.runFirstLinearTo(content, trimSpace, dst)
+	}
+	if len(ms.entries) <= 64 {
+		return ms.runFirstIndexBitsTo(content, trimSpace, dst)
 	}
 
 	ctx := ms.newEvalContext(content)
 	seen := ms.newSeenSet()
 	ms.markCandidateSet(seen, ctx)
 	if ms.shouldFallBackToLinear(seen) {
-		return ms.runFirstLinear(content, trimSpace)
+		return ms.runFirstLinearTo(content, trimSpace, dst)
 	}
 	for i, entry := range ms.entries {
 		if !seen[i] {
@@ -165,7 +196,32 @@ func (ms *MatcherSet) runFirstIndex(content string, trimSpace bool) (int, []stri
 		if !entry.filter.Accepts(ctx) {
 			continue
 		}
-		ret, err := entry.matcher.Run(content, trimSpace)
+		ret, err := entry.matcher.runTo(content, trimSpace, dst)
+		if err == nil {
+			return i, ret, nil
+		}
+		if err == ErrMismatch {
+			continue
+		}
+		return -1, nil, err
+	}
+	return -1, nil, ErrMismatch
+}
+
+func (ms *MatcherSet) runFirstIndexBitsTo(content string, trimSpace bool, dst []string) (int, []string, error) {
+	ctx := ms.newEvalContext(content)
+	seen := ms.candidateBits(ctx)
+	if ms.shouldFallBackToLinearBits(seen) {
+		return ms.runFirstLinearTo(content, trimSpace, dst)
+	}
+	for i, entry := range ms.entries {
+		if seen&(uint64(1)<<uint(i)) == 0 {
+			continue
+		}
+		if !entry.filter.Accepts(ctx) {
+			continue
+		}
+		ret, err := entry.matcher.runTo(content, trimSpace, dst)
 		if err == nil {
 			return i, ret, nil
 		}
@@ -178,8 +234,12 @@ func (ms *MatcherSet) runFirstIndex(content string, trimSpace bool) (int, []stri
 }
 
 func (ms *MatcherSet) runFirstLinear(content string, trimSpace bool) (int, []string, error) {
+	return ms.runFirstLinearTo(content, trimSpace, nil)
+}
+
+func (ms *MatcherSet) runFirstLinearTo(content string, trimSpace bool, dst []string) (int, []string, error) {
 	for i, matcher := range ms.linearMatchers {
-		ret, err := matcher.Run(content, trimSpace)
+		ret, err := matcher.runTo(content, trimSpace, dst)
 		if err == nil {
 			return i, ret, nil
 		}
@@ -284,6 +344,40 @@ func (ms *MatcherSet) markCandidateSet(seen []bool, ctx matcherSetEvalContext) {
 	markMatcherSetIndexes(seen, ms.fallback)
 }
 
+func (ms *MatcherSet) candidateBits(ctx matcherSetEvalContext) uint64 {
+	var seen uint64
+
+	if len(ms.exact) > 0 {
+		seen = markMatcherSetIndexBits(seen, ms.exact[ctx.Content])
+	}
+
+	if len(ctx.Content) > 0 && len(ms.anchoredBuckets) > 0 {
+		for _, bucket := range ms.anchoredBuckets[ctx.Content[0]] {
+			if strings.HasPrefix(ctx.Content, bucket.key) {
+				seen = markMatcherSetIndexBits(seen, bucket.indexes)
+			}
+		}
+	}
+
+	if ctx.UseBits {
+		for i := 0; i < len(ms.atomPostings) && i < 64; i++ {
+			if ctx.AtomBits&(uint64(1)<<uint(i)) == 0 {
+				continue
+			}
+			seen = markMatcherSetIndexBits(seen, ms.atomPostings[i].indexes)
+		}
+	} else if len(ctx.AtomHits) > 0 {
+		for i, hit := range ctx.AtomHits {
+			if !hit {
+				continue
+			}
+			seen = markMatcherSetIndexBits(seen, ms.atomPostings[i].indexes)
+		}
+	}
+
+	return markMatcherSetIndexBits(seen, ms.fallback)
+}
+
 func (ms *MatcherSet) shouldFallBackToLinear(seen []bool) bool {
 	entryCount := len(ms.entries)
 	if entryCount == 0 || entryCount > 16 {
@@ -296,6 +390,14 @@ func (ms *MatcherSet) shouldFallBackToLinear(seen []bool) bool {
 		}
 	}
 	return candidates*3 >= entryCount*2
+}
+
+func (ms *MatcherSet) shouldFallBackToLinearBits(seen uint64) bool {
+	entryCount := len(ms.entries)
+	if entryCount == 0 || entryCount > 16 {
+		return false
+	}
+	return bits.OnesCount64(seen)*3 >= entryCount*2
 }
 
 func matcherSetAtoms(pf *regexpPrefilter) []string {
@@ -419,6 +521,13 @@ func markMatcherSetIndexes(dst []bool, indexes []int) {
 	for _, idx := range indexes {
 		dst[idx] = true
 	}
+}
+
+func markMatcherSetIndexBits(seen uint64, indexes []int) uint64 {
+	for _, idx := range indexes {
+		seen |= uint64(1) << uint(idx)
+	}
+	return seen
 }
 
 func shouldPreferLinearMatcherSet(ms *MatcherSet) bool {

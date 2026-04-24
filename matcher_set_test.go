@@ -58,6 +58,26 @@ func TestMatcherSetRunFirstUsesInOrderConfirmation(t *testing.T) {
 	assert.ErrorIs(t, err, ErrMismatch)
 }
 
+func TestMatcherSetRunFirstToReusesBuffer(t *testing.T) {
+	ms := newTestMatcherSet(t,
+		testMatcherSetPattern{ID: "miss", Pattern: `^foo\d+baz$`},
+		testMatcherSetPattern{ID: "hit", Pattern: `^foo(?P<num>\d+)bar$`},
+	)
+
+	assert.Equal(t, 1, ms.MatchCount())
+	buf := make([]string, 0, ms.MatchCount())
+	id, ret, err := ms.RunFirstTo("foo42bar", true, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, "hit", id)
+	assert.Equal(t, []string{"42"}, ret)
+	if len(ret) > 0 && &ret[0] != &buf[:1][0] {
+		t.Fatal("expected RunFirstTo to reuse caller buffer")
+	}
+}
+
 func TestMatcherSetCandidateIDsHandlesOverlappingAtoms(t *testing.T) {
 	ms := newTestMatcherSet(t,
 		testMatcherSetPattern{ID: "short", Pattern: `^svc.*trace=req.*accepted$`},
@@ -182,6 +202,20 @@ func BenchmarkMatcherSetRunFirst(b *testing.B) {
 		}
 	})
 
+	b.Run("matcher_set_reuse", func(b *testing.B) {
+		buf := make([]string, 0, ms.MatchCount())
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			id, ret, err := ms.RunFirstTo(line, true, buf)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if id != "target" || len(ret) != 2 {
+				b.Fatalf("unexpected result id=%q ret=%v", id, ret)
+			}
+		}
+	})
+
 	b.Run("manual_loop", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -227,6 +261,20 @@ func BenchmarkMatcherSetRunFirstLargeSet(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			id, ret, err := ms.RunFirst(line, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if id != "target" || len(ret) != 3 {
+				b.Fatalf("unexpected result id=%q ret=%v", id, ret)
+			}
+		}
+	})
+
+	b.Run("matcher_set_reuse", func(b *testing.B) {
+		buf := make([]string, 0, ms.MatchCount())
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			id, ret, err := ms.RunFirstTo(line, true, buf)
 			if err != nil {
 				b.Fatal(err)
 			}

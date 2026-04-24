@@ -11,13 +11,17 @@ many subpackages too early.
 - `GrokRegexp.RunTo`
 - `GrokRegexp.RunWithTypeInfo`
 - `GrokRegexp.RunWithTypeInfoTo`
+- `NewMatcherSet`
+- `MatcherSet.RunFirst`
+- `MatcherSet.RunFirstTo`
 
-For `pipeline-go`, the intended reusable-buffer typed entrypoint is:
+For `pipeline-go`, the intended reusable-buffer entrypoints are:
 
 - `GrokRegexp.RunWithTypeInfoTo`
+- `MatcherSet.RunFirstTo`
 
-This avoids per-call result allocation while preserving the current matching
-and casting semantics.
+These avoid per-call result allocation while preserving current matching order,
+capture extraction, and casting semantics.
 
 ## Current File Groups
 

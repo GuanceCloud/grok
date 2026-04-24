@@ -55,14 +55,22 @@ func main() {
 
 ```
 
-### Reusable Typed Entry Point
+### Reusable Entry Points
 
 For callers such as `pipeline-go` that want to reuse result buffers, use
-`RunWithTypeInfoTo`:
+`RunTo` or `RunWithTypeInfoTo`:
 
 ```go
 buf := make([]any, 0, g.MatchCount())
 ret, err := g.RunWithTypeInfoTo(line, true, buf)
+```
+
+For multi-pattern pipelines, compile a `MatcherSet` and reuse one buffer sized
+from the largest matcher:
+
+```go
+buf := make([]string, 0, set.MatchCount())
+id, ret, err := set.RunFirstTo(line, true, buf)
 ```
 
 output:

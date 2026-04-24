@@ -1,114 +1,104 @@
 # Current Context
 
-This file is a local handoff note for ongoing performance work on `github.com/GuanceCloud/grok`.
+This is a local handoff note for ongoing performance work on
+`github.com/GuanceCloud/grok`.
 
 ## Branch State
 
 - Branch: `feat-best`
-- Latest pushed commit: `8f79eb0` (`improve structured matcher dispatch`)
 - Remote: `origin/feat-best`
+- Compare worktree used for review: `/tmp/grok-master-compare` at `master`
 
 ## Current Goal
 
-The recent work focused on making the structured matcher more like a compile-time linear/dissect-style runner for stable log layouts, while keeping regex parity.
+Keep the structured matcher wins, remove stale performance documentation, and
+make the multi-pattern pipeline path cheaper for `pipeline-go`.
 
-## What Was Implemented
+## Current Status
 
-### Regexp-side prefiltering
-
-- Added `regex_prefilter.go`
-- `regexp` fallback now supports:
-  - anchored prefix rejection
-  - literal-set rejection
-  - required literal sequence rejection
-
-This is wired through:
-
-- `pattern.go`
-- `grok.go`
-
-### Structured matcher improvements
-
-- Added required literal extraction for structured matchers
-- Added wrapped-parser compaction for safe `literal + parser + literal` segments
-- Re-exposed wrapped parser boundaries back into IR/slicing so earlier steps can still use them as cut points
-- Fixed token slicing for:
-  - `SPACE* + literal`
-  - wrapped-next-step boundaries
-  - `NOTSPACE`/numeric token cases where the old fast path silently failed and fell back to `regexp`
-
-### Important effect
-
-Two previously problematic cases now actually hit the structured fast matcher instead of failing and falling through to regex:
-
-- `ElasticSearch_log`
-- `Tomcat_Catalina_log`
-
-## Validation Status
-
-Latest verified state before writing this file:
-
-- `go test ./...` passes
-- Datakit full benchmark is back to `24/24` faster than `regexp`
+- `go test -run 'TestMatcherSet|TestDatakitFixturesMatchRegexp' ./...` passes.
+- `BenchmarkDatakitFixtures` is currently `24/24` faster than regexp fallback.
+- `ElasticSearch_log` now hits the structured path and is no longer the
+  unresolved outlier described by the old docs.
+- `MatcherSet` now exposes reusable-buffer APIs:
+  - `MatchCount`
+  - `RunFirstTo`
+- Unanchored structured search with writable optional groups is guarded:
+  complex cases are limited to a position-zero attempt, very small risky cases
+  skip structured matching, and deterministic wrapped optionals stay linear.
+- Terminal greedy captures followed only by their closing literal are treated as
+  linear and avoid the recursive change-log path.
+- Backtracking change logs are pooled, so complex structured patterns no longer
+  allocate a rollback buffer on every match.
+- Parser backtracking classification is cached on each structured step at
+  compile time.
+- Linear dissect runners execute directly in the outer runner now, avoiding the
+  previous per-step callback layer.
+- `MatcherSet` uses a `uint64` candidate bitset for small sets, removing the
+  dispatch-side `[]bool` allocation from `RunFirstTo`.
+- `ElasticSearch_search_slow_log` now hits its specialized runner; the matcher
+  accepts the normalized `(?:query|fetch)` pattern form produced by
+  denormalization.
+- Anchored dissect runners have a terminal `GREEDYDATA` fast path for common
+  fixed-prefix plus message-tail patterns.
 
 ## Key Benchmark Snapshot
 
-Recent benchmark results:
+Recent Datakit fixture numbers:
 
-- `ElasticSearch_log`
-  - fast: about `631ns/op`, `64 B/op`, `1 alloc/op`
-  - regexp: about `8010ns/op`, `146 B/op`, `2 allocs/op`
+- `ElasticSearch_log`: `322.2ns/op`, `64 B/op`, `1 alloc/op`
+- `ElasticSearch_search_slow_log`: `101.5-103.5ns/op`, `80 B/op`, `1 alloc/op`
+- `Apache_error_log`: `726.9ns/op`, `64 B/op`, `1 alloc/op`
+- `Consul_log`: `756.2ns/op`, `64 B/op`, `1 alloc/op`
+- `PostgreSQL_log`: `864.0ns/op`, `128 B/op`, `1 alloc/op`
+- `MySQL_slow_log`: `950.1ns/op`, `240 B/op`, `1 alloc/op`
+- `Nginx_error_log2`: `67.4ns/op`, `48 B/op`, `1 alloc/op`
 
-- `Tomcat_Catalina_log`
-  - fast: about `278ns/op`, `80 B/op`, `1 alloc/op`
-  - regexp: about `924ns/op`, `176 B/op`, `2 allocs/op`
+Common-pattern generality check:
 
-- `Apache_error_log`
-  - fast: about `563ns/op`
-  - regexp: about `3407ns/op`
+- `11/11` measured common application patterns are faster on the fast path.
+- `go_worker_optional_trace` is now around `175ns/op`, `80 B/op`,
+  `1 alloc/op` after deterministic wrapped optionals were linearized.
 
-- `Consul_log`
-  - fast: about `690ns/op`
-  - regexp: about `9188ns/op`
+Realistic business-log check:
 
-- `MySQL_slow_log`
-  - fast: about `1395ns/op`
-  - regexp: about `2019ns/op`
+- `business_order_logfmt`: `244.1-245.2ns/op`, `144 B/op`, `1 alloc/op`; `RunTo`: `210.5-211.7ns/op`, `0 alloc`
+- `api_gateway_access`: `160.9-170.3ns/op`, `112 B/op`, `1 alloc/op`; `RunTo`: `134.0-142.4ns/op`, `0 alloc`
+- `optional_trace_worker`: `187.8ns/op`, `80 B/op`, `1 alloc/op`
+- `java_order_service`: `192.2-193.9ns/op`, `112 B/op`, `1 alloc/op`; `RunTo`: `162.8-163.9ns/op`, `0 alloc`
+- `db_slow_query`: `121.4-121.9ns/op`, `64 B/op`, `1 alloc/op`; `RunTo`: `105.2-106.5ns/op`, `0 alloc`
+- `message_queue_consumer`: `199.4-200.6ns/op`, `128 B/op`, `1 alloc/op`; `RunTo`: `174.8-175.2ns/op`, `0 alloc`
+- `python_gunicorn_order_access`: `377.8ns/op`, `144 B/op`, `1 alloc/op`
+- `k8s_controller_runtime`: `461.9ns/op`, `128 B/op`, `1 alloc/op`
 
-## Important Tests Added/Used
+Pipeline dispatch with reusable buffers:
 
-Useful regression tests that reflect the current direction:
+- `apache`: `117.0-117.6ns/op`, `96 B/op`, `1 alloc/op` -> `97.6-105.3ns/op`, `0 B/op`, `0 allocs/op`
+- `elasticsearch`: `672.2-673.1ns/op`, `224 B/op`, `3 allocs/op` -> `595.8-603.6ns/op`, `0 B/op`, `0 allocs/op`
+- `kafka`: `477.8-478.8ns/op`, `304 B/op`, `4 allocs/op` -> `397.1-403.5ns/op`, `0 B/op`, `0 allocs/op`
+- `mysql`: `76.4-78.9ns/op`, `64 B/op`, `1 alloc/op` -> `59.0-61.3ns/op`, `0 B/op`, `0 allocs/op`
+- `nginx`: `182.2-184.8ns/op`, `144 B/op`, `1 alloc/op` -> `152.4-162.5ns/op`, `0 B/op`, `0 allocs/op`
+- `tomcat`: `114.7-115.7ns/op`, `80 B/op`, `1 alloc/op` -> `94.5-95.0ns/op`, `0 B/op`, `0 allocs/op`
 
-- `TestStructuredElasticSearchDefaultFixtureUsesFastMatcher`
-- `TestStructuredTomcatCatalinaFixtureUsesFastMatcher`
-- `TestStructuredWrappedParserStepMatchesRegexp`
-- existing Datakit fixture parity tests
-- existing fuzz targets in `fuzz_fastpath_test.go`
+## Integration Guidance
 
-## Current Design Direction
+For `pipeline-go`, compile related grok patterns into a `MatcherSet` and reuse a
+per-worker buffer:
 
-The current code is moving toward:
+```go
+buf := make([]string, 0, set.MatchCount())
+id, values, err := set.RunFirstTo(line, true, buf)
+```
 
-1. stronger compile-time literal/atom prefiltering
-2. more linear structured execution for anchored stable patterns
-3. dissect-style compaction only when regex parity remains safe
-
-The current approach is still built on top of `structuredStep`; there is not yet a separate standalone `anchored dissect runner`.
-
-## If Continuing From Here
-
-Recommended next steps:
-
-1. Refresh `docs/perf/BENCHMARKS.md` with the latest post-fix numbers.
-2. Re-run longer fuzz/parity passes after the latest wrapped-parser and slicing changes.
-3. If more speed is needed, consider a dedicated `anchored linear runner` instead of continuing to increase `structuredStep` complexity.
+This keeps existing matching order and semantic confirmation while removing the
+result-slice allocation from most hot dispatch paths.
 
 ## Files Most Relevant To Continue
 
+- `matcher_set.go`
+- `datakit_pipeline_test.go`
 - `structured_fastpath.go`
 - `regex_prefilter.go`
 - `grok.go`
-- `pattern.go`
-- `grok_test.go`
 - `docs/perf/BENCHMARKS.md`
 - `docs/perf/PERFORMANCE_NOTES.md`

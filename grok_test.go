@@ -515,6 +515,9 @@ func TestElasticsearchSearchSlowPattern(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if g.fastMatcher == nil || g.fastMatcher.elasticSearchRunner == nil {
+		t.Fatalf("expected elasticsearch search slow runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
+	}
 
 	line := `[2021-06-01T11:56:06,712][WARN ][i.s.s.query              ] [master] [shopping][0] took[36.3ms], took_millis[36], total_hits[5 hits], types[], stats[], search_type[QUERY_THEN_FETCH], total_shards[1], source[{"query":{"match":{"name":{"query":"Nariko","operator":"OR","prefix_length":0,"max_expansions":50,"fuzzy_transpositions":true,"lenient":false,"zero_terms_query":"NONE","auto_generate_synonyms_phrase_query":true,"boost":1.0}}},"sort":[{"price":{"order":"desc"}}]}], id[],`
 	ret, err := g.Run(line, true)
@@ -547,6 +550,48 @@ func TestElasticsearchIndexSlowPattern(t *testing.T) {
 	assert.Equal(t, "master", ret[g.nameIndex["nodeId"]])
 	assert.Equal(t, "shopping", ret[g.nameIndex["index"]])
 	assert.Equal(t, "34", ret[g.nameIndex["duration"]])
+}
+
+func TestRunToReusesCallerBuffer(t *testing.T) {
+	g, err := CompilePattern(`%{WORD:name} %{INT:code}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := []string{"old-name", "old-code"}
+	ret, err := g.RunTo("HELLO 42", true, buf[:0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, 2, g.MatchCount())
+	assert.Equal(t, "HELLO", ret[g.nameIndex["name"]])
+	assert.Equal(t, "42", ret[g.nameIndex["code"]])
+	assert.Equal(t, &buf[:2][0], &ret[0])
+}
+
+func TestTerminalGreedyDataDoesNotCrossNewline(t *testing.T) {
+	pattern := `%{WORD:name} %{GREEDYDATA:msg}`
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil || current.fastMatcher.anchoredRunner == nil {
+		t.Fatalf("expected anchored runner, steps=%s", describeStructuredMatcherSteps(current.fastMatcher))
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := "foo bar\nbaz"
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, "bar", fastRet[current.nameIndex["msg"]])
 }
 
 func TestElasticsearchDefaultPattern(t *testing.T) {

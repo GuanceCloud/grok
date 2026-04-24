@@ -1,6 +1,10 @@
 package grok
 
-import internalmatch "github.com/GuanceCloud/grok/internal/match"
+import (
+	"strings"
+
+	internalmatch "github.com/GuanceCloud/grok/internal/match"
+)
 
 type anchoredDissectRunner struct {
 	impl    *internalmatch.AnchoredDissectRunner
@@ -146,63 +150,164 @@ func stepHasWrappedParserKind(step structuredStep, prefix, suffix string, kinds 
 }
 
 func (r *anchoredDissectRunner) run(dst []string, content string, trimSpace bool) (int, bool) {
+	return r.runAt(dst, content, 0, trimSpace)
+}
+
+func (r *anchoredDissectRunner) runAt(dst []string, content string, pos int, trimSpace bool) (int, bool) {
 	if r == nil || r.impl == nil {
 		return 0, false
 	}
+	if pos < 0 || pos > len(content) {
+		return 0, false
+	}
 
-	return r.impl.RunStrings(
-		dst,
-		content,
-		trimSpace,
-		func(parserIndex int, content string, pos int) (int, string, bool) {
-			return r.parsers[parserIndex].consume(content, pos)
-		},
-		func(parserIndex int, optPrefix string, optSkip bool, content string, pos int) bool {
-			parser := r.parsers[parserIndex]
-			return shouldSkipOptionalParser(parser, structuredStep{
-				parser:                parser,
-				optional:              true,
-				deterministicOptional: true,
-				optPrefix:             optPrefix,
-				optPrefixSkips:        optSkip,
-			}, content, pos)
-		},
-		func(dst []string, captureIndex int, value string, trimSpace bool) {
-			dst[captureIndex] = maybeTrim(value, trimSpace)
-		},
-		func(dst []string, dstIndex int, value string, trimSpace bool) {
-			dst[dstIndex] = maybeTrim(value, trimSpace)
-		},
-	)
+	for opIdx, op := range r.impl.Ops {
+		if len(content)-pos < op.TailMinWidth {
+			return 0, false
+		}
+		if op.Literal != "" {
+			if hasPrefixAt(content, pos, op.Literal) {
+				if op.CaptureIndex >= 0 {
+					dst[op.CaptureIndex] = maybeTrim(content[pos:pos+len(op.Literal)], trimSpace)
+				}
+				pos += len(op.Literal)
+				continue
+			}
+			if op.Optional {
+				if op.OptPrefix != "" && !op.OptSkip && hasPrefixAt(content, pos, op.OptPrefix) {
+					return 0, false
+				}
+				continue
+			}
+			return 0, false
+		}
+
+		parser := r.parsers[op.ParserIndex]
+		if opIdx == len(r.impl.Ops)-1 && canConsumeTerminalDotRun(parser) {
+			next, value, ok := consumeTerminalDotRun(parser, content, pos)
+			if !ok {
+				return 0, false
+			}
+			if op.ParserDstIndex >= 0 {
+				dst[op.ParserDstIndex] = maybeTrim(value, trimSpace)
+			}
+			return next, true
+		}
+		if op.Optional && shouldSkipOptionalParser(parser, structuredStep{
+			parser:                parser,
+			optional:              true,
+			deterministicOptional: true,
+			optPrefix:             op.OptPrefix,
+			optPrefixSkips:        op.OptSkip,
+		}, content, pos) {
+			continue
+		}
+
+		next, value, ok := parser.consume(content, pos)
+		if !ok {
+			return 0, false
+		}
+		if op.ParserDstIndex >= 0 {
+			dst[op.ParserDstIndex] = maybeTrim(value, trimSpace)
+		}
+		pos = next
+	}
+
+	return pos, true
 }
 
 func (r *anchoredDissectRunner) runTyped(dst []any, content string, trimSpace bool, kinds []valueKind) (int, bool) {
+	return r.runTypedAt(dst, content, 0, trimSpace, kinds)
+}
+
+func (r *anchoredDissectRunner) runTypedAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) (int, bool) {
 	if r == nil || r.impl == nil {
 		return 0, false
 	}
+	if pos < 0 || pos > len(content) {
+		return 0, false
+	}
 
-	return r.impl.RunTyped(
-		dst,
-		content,
-		trimSpace,
-		func(parserIndex int, content string, pos int) (int, string, bool) {
-			return r.parsers[parserIndex].consume(content, pos)
-		},
-		func(parserIndex int, optPrefix string, optSkip bool, content string, pos int) bool {
-			parser := r.parsers[parserIndex]
-			return shouldSkipOptionalParser(parser, structuredStep{
-				parser:                parser,
-				optional:              true,
-				deterministicOptional: true,
-				optPrefix:             optPrefix,
-				optPrefixSkips:        optSkip,
-			}, content, pos)
-		},
-		func(dst []any, captureIndex int, value string, trimSpace bool) {
-			dst[captureIndex] = castStructuredValue(value, trimSpace, kinds[captureIndex])
-		},
-		func(dst []any, dstIndex int, value string, trimSpace bool) {
-			dst[dstIndex] = castStructuredValue(value, trimSpace, kinds[dstIndex])
-		},
-	)
+	for opIdx, op := range r.impl.Ops {
+		if len(content)-pos < op.TailMinWidth {
+			return 0, false
+		}
+		if op.Literal != "" {
+			if hasPrefixAt(content, pos, op.Literal) {
+				if op.CaptureIndex >= 0 {
+					dst[op.CaptureIndex] = castStructuredValue(content[pos:pos+len(op.Literal)], trimSpace, kinds[op.CaptureIndex])
+				}
+				pos += len(op.Literal)
+				continue
+			}
+			if op.Optional {
+				if op.OptPrefix != "" && !op.OptSkip && hasPrefixAt(content, pos, op.OptPrefix) {
+					return 0, false
+				}
+				continue
+			}
+			return 0, false
+		}
+
+		parser := r.parsers[op.ParserIndex]
+		if opIdx == len(r.impl.Ops)-1 && canConsumeTerminalDotRun(parser) {
+			next, value, ok := consumeTerminalDotRun(parser, content, pos)
+			if !ok {
+				return 0, false
+			}
+			if op.ParserDstIndex >= 0 {
+				dst[op.ParserDstIndex] = castStructuredValue(value, trimSpace, kinds[op.ParserDstIndex])
+			}
+			return next, true
+		}
+		if op.Optional && shouldSkipOptionalParser(parser, structuredStep{
+			parser:                parser,
+			optional:              true,
+			deterministicOptional: true,
+			optPrefix:             op.OptPrefix,
+			optPrefixSkips:        op.OptSkip,
+		}, content, pos) {
+			continue
+		}
+
+		next, value, ok := parser.consume(content, pos)
+		if !ok {
+			return 0, false
+		}
+		if op.ParserDstIndex >= 0 {
+			dst[op.ParserDstIndex] = castStructuredValue(value, trimSpace, kinds[op.ParserDstIndex])
+		}
+		pos = next
+	}
+
+	return pos, true
+}
+
+func hasPrefixAt(s string, pos int, prefix string) bool {
+	return pos >= 0 && len(s)-pos >= len(prefix) && s[pos:pos+len(prefix)] == prefix
+}
+
+func canConsumeTerminalDotRun(p *structuredParser) bool {
+	return p != nil &&
+		p.inner == nil &&
+		p.wrapPrefix == "" &&
+		p.wrapSuffix == "" &&
+		p.nextLiteral == "" &&
+		p.kind == structuredGreedyUntilLiteral
+}
+
+func consumeTerminalDotRun(p *structuredParser, content string, pos int) (int, string, bool) {
+	if pos > len(content) {
+		return 0, "", false
+	}
+	next := len(content)
+	if !p.dotAll {
+		if idx := strings.IndexByte(content[pos:], '\n'); idx >= 0 {
+			next = pos + idx
+		}
+	}
+	if !p.allowEmpty && next == pos {
+		return 0, "", false
+	}
+	return next, content[pos:next], true
 }

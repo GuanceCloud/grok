@@ -32,7 +32,7 @@ func TestAnchoredDissectRunnerAttached(t *testing.T) {
 }
 
 func TestAnchoredDissectRunnerRejectsBacktrackingPatterns(t *testing.T) {
-	current, err := CompilePattern(`^foo %{GREEDYDATA:name} bar$`, PatternStorage{defalutDenormalizedPatterns})
+	current, err := CompilePattern(`^foo %{GREEDYDATA:name} bar %{INT:id} baz$`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}

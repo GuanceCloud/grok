@@ -7,18 +7,18 @@ import (
 )
 
 var monthNameValues = [...]string{
-	"Jan", "January", "Januar",
-	"Feb", "February", "Februar",
-	"Mr", "Mar", "Mär", "Mrch", "March", "Mrz", "März",
+	"Jan", "January",
+	"Feb", "February",
+	"Mar", "March",
 	"Apr", "April",
-	"Ma", "May", "Mai",
-	"Jun", "June", "Juni",
+	"May",
+	"Jun", "June",
 	"Jul", "July",
 	"Aug", "August",
 	"Sep", "September",
-	"Ot", "Oct", "Okt", "October",
+	"Oct", "October",
 	"Nov", "November",
-	"Dec", "Dez", "December", "Dezember",
+	"Dec", "December",
 }
 
 var dayNameValues = [...]string{
@@ -264,7 +264,7 @@ func consumeCanonicalHTTPDate(s string, start int) (int, bool) {
 	}
 	i += 3
 
-	if !isCanonicalMonthAbbrev(s[i : i+3]) || s[i+3] != '/' {
+	if !isCanonicalMonthAbbrev(s[i:i+3]) || s[i+3] != '/' {
 		return 0, false
 	}
 	i += 4

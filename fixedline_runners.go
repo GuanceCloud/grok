@@ -196,7 +196,7 @@ func (r *tomcatCatalinaRunner) match(content string) (timeVal, statusVal, thread
 
 func consumeOlfTime(s string, start int) (int, bool) {
 	i := start
-	if !consumeOneOrTwoDigits(s, &i) || i >= len(s) || s[i] != '-' {
+	if !consumeTwoDigitRange(s, &i, 1, 31, true) || i >= len(s) || s[i] != '-' {
 		return 0, false
 	}
 	i++

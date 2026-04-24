@@ -293,6 +293,16 @@ func BenchmarkDatakitPipelineDispatch(b *testing.B) {
 								}
 							}
 						})
+						b.Run("matcher_set_reuse", func(b *testing.B) {
+							buf := make([]string, 0, compiled.currentSet.MatchCount())
+							b.ReportAllocs()
+							for i := 0; i < b.N; i++ {
+								_, _, err := compiled.currentSet.runFirstIndexTo(line, true, buf)
+								if err != nil {
+									b.Fatal(err)
+								}
+							}
+						})
 						b.Run("manual_loop", func(b *testing.B) {
 							b.ReportAllocs()
 							for i := 0; i < b.N; i++ {
