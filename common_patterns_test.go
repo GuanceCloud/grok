@@ -98,7 +98,7 @@ func loadCommonPatternCases() []commonPatternCase {
 		{
 			name:    "bracket_chain_optional_node",
 			pattern: `\[%{TIMESTAMP_ISO8601:time}\] \[%{LOGLEVEL:level}\] \[%{NOTSPACE:component}\] (\[%{HOSTNAME:node}\] )?\[%{NOTSPACE:tenant}\] %{GREEDYDATA:msg}`,
-			line:    `[2026-04-22T10:11:12,123] [WARN ] [billing.worker] [node-a] [tenant-42] rate limiter rejected 3 requests`,
+			line:    `[2026-04-22T10:11:12,123] [WARN] [billing.worker] [node-a] [tenant-42] rate limiter rejected 3 requests`,
 		},
 		{
 			name: "custom_alias_nginx_error",
@@ -172,6 +172,12 @@ func TestCommonComposedPatternsMatchRegexp(t *testing.T) {
 		if !reflect.DeepEqual(fastRet, regexpRet) || fastErr != regexpErr {
 			t.Fatalf("%s diverged: fast=%v/%v regexp=%v/%v", fixture.name, fastRet, fastErr, regexpRet, regexpErr)
 		}
+		if fastErr != nil {
+			t.Fatalf("%s fixture line did not match: %v", fixture.name, fastErr)
+		}
+		if len(fastRet) == 0 {
+			t.Fatalf("%s fixture line matched with empty result", fixture.name)
+		}
 	}
 
 	if fastCount < len(fixtures)/2 {
@@ -191,6 +197,28 @@ func TestControllerRuntimePatternUsesFastMatcher(t *testing.T) {
 		return
 	}
 	t.Fatal("expected controller-runtime fixture")
+}
+
+func TestCustomAliasNginxErrorUsesRunner(t *testing.T) {
+	fixtures := loadCommonPatternFixtures(t)
+	for _, fixture := range fixtures {
+		if fixture.name != "custom_alias_nginx_error" {
+			continue
+		}
+		if fixture.current.fastMatcher == nil || fixture.current.fastMatcher.nginxErrorRunner == nil {
+			t.Fatalf("expected custom nginx error pattern to use nginx error runner")
+		}
+		lines := []string{
+			fixture.line,
+			`2026/04/22 10:11:12 [error] upstream timed out while reading response header from upstream, client: 10.0.0.8, server: gateway.local, request: "GET /api/orders HTTP/1.1", host: "demo.local"`,
+			`2026/04/22 10:11:12 [error] upstream timed out while reading response header from upstream, client: , server: gateway.local, request: "GET /api/orders HTTP/1.1", host: "demo.local"`,
+		}
+		for _, line := range lines {
+			assertRunParity(t, fixture.current, fixture.regexpOnly, line, true)
+		}
+		return
+	}
+	t.Fatal("expected custom nginx error fixture")
 }
 
 func BenchmarkCommonComposedPatterns(b *testing.B) {

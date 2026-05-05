@@ -358,6 +358,29 @@ func TestRunWithTypeInfoStructuredFastPathMatchesRegexp(t *testing.T) {
 	assert.Equal(t, []any{"2026-04-22T10:11:12.123+08:00", int64(200), float64(12.4), true, int64(532), "request completed"}, fastRet)
 }
 
+func TestRunWithTypeInfoMatchesRegexpPath(t *testing.T) {
+	pattern := `%{INT:A:int} %{WORD:B:bool} %{BASE10NUM:C:float}`
+	fast, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fast.fastMatcher == nil {
+		t.Fatal("expected structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := "1 true 1.1"
+	fastRet, fastErr := fast.RunWithTypeInfo(line, true)
+	regexpRet, regexpErr := regexpOnly.RunWithTypeInfo(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
 func TestCommonApacheLogRawRequest(t *testing.T) {
 	g, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -834,6 +857,34 @@ func TestStructuredOptionalLiteralPattern(t *testing.T) {
 		t.Fatal("expected optional literal fast matcher to match empty host")
 	}
 	assert.Equal(t, "", dst[g.nameIndex["host"]])
+}
+
+func TestStructuredHTTPD20ErrorLogUsesFastMatcher(t *testing.T) {
+	current, err := CompilePattern(`%{HTTPD20_ERRORLOG}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected HTTPD20_ERRORLOG to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(`%{HTTPD20_ERRORLOG}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	cases := []string{
+		`[Wed Jun 02 16:32:14.123456 2021] [error] [client 127.0.0.1] client denied by server configuration: /var/www/html/private`,
+		`[Wed Jun 02 16:32:14.123456 2021] [error] client denied by server configuration: /var/www/html/private`,
+	}
+
+	for _, line := range cases {
+		fastRet, fastErr := current.Run(line, true)
+		regexpRet, regexpErr := regexpOnly.Run(line, true)
+		assert.Equalf(t, regexpErr, fastErr, "HTTPD20_ERRORLOG error diverged for %q", line)
+		assert.Equalf(t, regexpRet, fastRet, "HTTPD20_ERRORLOG result diverged for %q", line)
+	}
 }
 
 func TestStructuredCharClassStarPattern(t *testing.T) {
@@ -1338,6 +1389,21 @@ func TestStructuredNginxAccessFixtureUsesFastMatcher(t *testing.T) {
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
 	assert.Equal(t, regexpErr, fastErr)
 	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredNginxAccessRejectsDoubleSpaceLikeRegexp(t *testing.T) {
+	fixture := mustDatakitFixtureByName(t, "nginx/nginx/nginx/Nginx_access_log")
+	lines := []string{
+		`127.0.0.  0 0 [01/May/0000:00:00:00 00000] "000 0000000000000 HTTP/000" 000 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`,
+		`127.0. - - [24/Mar/2021:13:54:19 0] "GET /basic_status HTTP/+.0" 000 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`,
+	}
+
+	for _, line := range lines {
+		fastRet, fastErr := fixture.current.Run(line, true)
+		regexpRet, regexpErr := fixture.regexpOnly.Run(line, true)
+		assert.Equalf(t, regexpErr, fastErr, "nginx access error diverged for %q", line)
+		assert.Equalf(t, regexpRet, fastRet, "nginx access result diverged for %q", line)
+	}
 }
 
 func traceStructuredMatcherFailure(m *structuredMatcher, content string, trimSpace bool) (int, int) {
@@ -1899,6 +1965,35 @@ func TestStructuredWrappedParserStepMatchesRegexp(t *testing.T) {
 	}
 }
 
+func TestStructuredOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(t *testing.T) {
+	pattern := `\[%{LOGLEVEL:level}\] (\[%{HOSTNAME:node}\] )?\[%{NOTSPACE:tenant}\] %{GREEDYDATA:msg}`
+	lines := []string{
+		`[WARN] [node-a] [tenant-42] rate limiter rejected 3 requests`,
+		`[WARN] [tenant-42] rate limiter rejected 3 requests`,
+	}
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected optional wrapped parser pattern to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	for _, line := range lines {
+		fastRet, fastErr := current.Run(line, true)
+		regexpRet, regexpErr := regexpOnly.Run(line, true)
+		assert.Equalf(t, regexpErr, fastErr, "optional wrapped parser error diverged for %q", line)
+		assert.Equalf(t, regexpRet, fastRet, "optional wrapped parser result diverged for %q", line)
+	}
+}
+
 func TestRunToReuseBuffer(t *testing.T) {
 	g, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -2264,6 +2359,101 @@ func BenchmarkRunWithTypeInfoPipelineAccessRegexpPath(b *testing.B) {
 			b.Fatal(ret)
 		}
 	}
+}
+
+func BenchmarkStructuredBoundedRepeatPatterns(b *testing.B) {
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+	}{
+		{
+			name:    "HTTPD20_ERRORLOG",
+			pattern: `%{HTTPD20_ERRORLOG}`,
+			line:    `[Wed Jun 02 16:32:14.123456 2021] [error] [client 127.0.0.1] client denied by server configuration: /var/www/html/private`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		fast, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			b.Fatalf("%s compile fast matcher: %v", tc.name, err)
+		}
+		if fast.fastMatcher == nil {
+			b.Fatalf("%s expected structured fast matcher", tc.name)
+		}
+
+		regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			b.Fatalf("%s compile regexp matcher: %v", tc.name, err)
+		}
+		regexpOnly.fastMatcher = nil
+
+		b.Run(tc.name+"/fast", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fast.Run(tc.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(tc.name+"/regexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := regexpOnly.Run(tc.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkRegexpPrefilterTailMismatch(b *testing.B) {
+	pattern := `\[%{TIMESTAMP_ISO8601:time}\] \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}"$`
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	current.fastMatcher = nil
+
+	noPrefilter := *current
+	noPrefilter.prefilter = nil
+	noPrefilter.multiFilter = nil
+	noPrefilter.filter = nil
+	noPrefilter.requiredPrefix = ""
+	noPrefilter.requiredSuffix = ""
+	noPrefilter.requiredLiterals = nil
+	noPrefilter.minMatchLength = 0
+
+	line := `[2024-06-21T09:14:18+00:00] [INFO] ` + strings.Repeat("x", 4096)
+
+	b.Run("prefilter", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := current.Run(line, true); err != ErrMismatch {
+				b.Fatalf("expected ErrMismatch, got %v", err)
+			}
+		}
+	})
+
+	b.Run("no_prefilter", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := noPrefilter.Run(line, true); err != ErrMismatch {
+				b.Fatalf("expected ErrMismatch, got %v", err)
+			}
+		}
+	})
 }
 
 func BenchmarkRunCommonApacheLogTo(b *testing.B) {

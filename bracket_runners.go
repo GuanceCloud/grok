@@ -457,10 +457,15 @@ type nginxErrorRunner struct {
 	versionIdx  int
 	upstreamIdx int
 	hostIdx     int
+	clientKind  structuredKind
+	serverKind  structuredKind
+	methodKind  structuredKind
+	versionKind structuredKind
+	hostKind    structuredKind
 }
 
 func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxErrorRunner, bool) {
-	if nameIndex == nil || !strings.Contains(pattern, `%{date2:time}`) || !strings.Contains(pattern, `%{LOGLEVEL:status}`) {
+	if nameIndex == nil || !nginxErrorPatternHasDate(pattern) || !nginxErrorPatternHasLevel(pattern) {
 		return nil, false
 	}
 	r := &nginxErrorRunner{timeIdx: -1, statusIdx: -1, msgIdx: -1, clientIdx: -1, serverIdx: -1, methodIdx: -1, urlIdx: -1, versionIdx: -1, upstreamIdx: -1, hostIdx: -1}
@@ -468,24 +473,32 @@ func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxEr
 	if r.timeIdx, ok = nameIndex["time"]; !ok {
 		return nil, false
 	}
-	if r.statusIdx, ok = nameIndex["status"]; !ok {
+	if r.statusIdx = lookupFirstNameIndex(nameIndex, "status", "level"); r.statusIdx < 0 {
 		return nil, false
 	}
 	if r.msgIdx, ok = nameIndex["msg"]; !ok {
 		return nil, false
 	}
-	r.clientIdx = lookupNameIndex(nameIndex, "client_ip")
+	r.clientIdx = lookupFirstNameIndex(nameIndex, "client_ip", "client")
 	r.serverIdx = lookupNameIndex(nameIndex, "server")
-	r.methodIdx = lookupNameIndex(nameIndex, "http_method")
-	r.urlIdx = lookupNameIndex(nameIndex, "http_url")
+	r.methodIdx = lookupFirstNameIndex(nameIndex, "http_method", "method")
+	r.urlIdx = lookupFirstNameIndex(nameIndex, "http_url", "path")
 	r.versionIdx = lookupNameIndex(nameIndex, "http_version")
 	r.upstreamIdx = lookupNameIndex(nameIndex, "upstream")
-	r.hostIdx = lookupNameIndex(nameIndex, "ip_or_host")
+	r.hostIdx = lookupFirstNameIndex(nameIndex, "ip_or_host", "host")
+	r.clientKind = structuredNotSpace
+	if strings.Contains(pattern, `client: %{IPORHOST:client}`) {
+		r.clientKind = structuredIPOrHost
+	}
+	r.serverKind = structuredNotSpace
+	r.methodKind = structuredWord
+	r.versionKind = structuredNumber
+	r.hostKind = structuredNotSpace
 	switch {
 	case pattern == `%{date2:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`:
 		r.kind = nginxErrorBare
-	case strings.Contains(pattern, `client: %{NOTSPACE:client_ip}`):
-		if strings.Contains(pattern, `upstream: \"%{GREEDYDATA:upstream}\"`) {
+	case nginxErrorPatternHasDetailedShape(pattern):
+		if strings.Contains(pattern, `upstream:`) || strings.Contains(pattern, `%{UPBLOCK}`) {
 			r.kind = nginxErrorDetailed
 		} else {
 			r.kind = nginxErrorSimple
@@ -494,6 +507,30 @@ func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxEr
 		return nil, false
 	}
 	return r, true
+}
+
+func nginxErrorPatternHasDate(pattern string) bool {
+	return strings.Contains(pattern, `%{date2:time}`) ||
+		strings.Contains(pattern, `%{APPDATE:time}`)
+}
+
+func nginxErrorPatternHasLevel(pattern string) bool {
+	return strings.Contains(pattern, `%{LOGLEVEL:status}`) ||
+		strings.Contains(pattern, `%{LOGLEVEL:level}`)
+}
+
+func nginxErrorPatternHasDetailedShape(pattern string) bool {
+	return strings.Contains(pattern, `client: %{NOTSPACE:client_ip}`) ||
+		strings.Contains(pattern, `client: %{IPORHOST:client}`)
+}
+
+func lookupFirstNameIndex(nameIndex map[string]int, names ...string) int {
+	for _, name := range names {
+		if idx, ok := nameIndex[name]; ok {
+			return idx
+		}
+	}
+	return -1
 }
 
 func (r *nginxErrorRunner) run(dst []string, content string, trimSpace bool) bool {
@@ -548,6 +585,9 @@ func (r *nginxErrorRunner) match(content string) (timeVal, statusVal, msgVal, cl
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	statusVal = content[statusStart : statusStart+end]
+	if !structuredSegmentMatchesKind(statusVal, structuredLogLevel) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	pos = statusStart + end + 1
 	if pos >= len(content) || content[pos] != ' ' {
 		return "", "", "", "", "", "", "", "", "", "", false
@@ -572,12 +612,18 @@ func (r *nginxErrorRunner) match(content string) (timeVal, statusVal, msgVal, cl
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	clientVal = content[pos : pos+clientEnd]
+	if !structuredSegmentMatchesKind(clientVal, r.clientKind) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	pos += clientEnd + len(`, server: `)
 	serverEnd := strings.Index(content[pos:], `, request: "`)
 	if serverEnd < 0 {
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	serverVal = content[pos : pos+serverEnd]
+	if !structuredSegmentMatchesKind(serverVal, r.serverKind) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	pos += serverEnd + len(`, request: "`)
 	httpIdx := strings.Index(content[pos:], ` HTTP/`)
 	if httpIdx < 0 {
@@ -589,6 +635,9 @@ func (r *nginxErrorRunner) match(content string) (timeVal, statusVal, msgVal, cl
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	methodVal = request[:space]
+	if !structuredSegmentMatchesKind(methodVal, r.methodKind) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	urlVal = request[space+1:]
 	pos += httpIdx + len(` HTTP/`)
 	versionEnd := strings.IndexByte(content[pos:], '"')
@@ -596,6 +645,9 @@ func (r *nginxErrorRunner) match(content string) (timeVal, statusVal, msgVal, cl
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	versionVal = content[pos : pos+versionEnd]
+	if !structuredSegmentMatchesKind(versionVal, r.versionKind) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	pos += versionEnd + 1
 	if strings.HasPrefix(content[pos:], `, upstream: "`) {
 		pos += len(`, upstream: "`)
@@ -615,6 +667,9 @@ func (r *nginxErrorRunner) match(content string) (timeVal, statusVal, msgVal, cl
 		return "", "", "", "", "", "", "", "", "", "", false
 	}
 	hostVal = content[pos : pos+hostEnd]
+	if !structuredSegmentMatchesKind(hostVal, r.hostKind) {
+		return "", "", "", "", "", "", "", "", "", "", false
+	}
 	return timeVal, statusVal, msgVal, clientVal, serverVal, methodVal, urlVal, versionVal, upstreamVal, hostVal, true
 }
 

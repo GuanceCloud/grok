@@ -79,6 +79,55 @@ func TestTypedPatternsMutationParity(t *testing.T) {
 	}
 }
 
+func TestAccessPatternsSearchAndTypedParity(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		lines   []string
+	}{
+		{
+			name:    "nginx_access_unanchored",
+			pattern: `%{NOTSPACE:client_ip:string} %{NOTSPACE:http_ident:string} %{NOTSPACE:http_auth:string} \[%{HTTPDATE:time:string}\] "%{DATA:http_method:string} %{GREEDYDATA:http_url:string} HTTP/%{NUMBER:http_version:float}" %{INT:status_code:int} %{INT:bytes:int}`,
+			lines: []string{
+				`127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`,
+				`prefix 127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`,
+				`127.0.0.1  admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`,
+				`127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/+.1" 404 207`,
+				`127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" x 207`,
+			},
+		},
+		{
+			name:    "apache_fixture_access",
+			pattern: `%{IPORHOST:client:string} - - \[%{HTTPDATE:time:string}\] "%{WORD:method:string} %{URIPATHPARAM:path:string} HTTP/%{NUMBER:http_version:float}" %{INT:status:int}`,
+			lines: []string{
+				`10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/1.1" 200`,
+				`prefix 10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/1.1" 200`,
+				`10.0.0.8  - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/1.1" 200`,
+				`10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/+.1" 200`,
+				`10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /healthz HTTP/1.1" x`,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		current, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			t.Fatalf("%s compile current: %v", tc.name, err)
+		}
+		regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+		if err != nil {
+			t.Fatalf("%s compile regexp: %v", tc.name, err)
+		}
+		regexpOnly.fastMatcher = nil
+		for idx, line := range tc.lines {
+			t.Run(tc.name+"/mut_"+string(rune('a'+idx)), func(t *testing.T) {
+				assertRunParity(t, current, regexpOnly, line, true)
+				assertTypedRunParity(t, current, regexpOnly, line, true)
+			})
+		}
+	}
+}
+
 func loadTypedMutationFixtures(t testing.TB) []typedMutationFixture {
 	t.Helper()
 

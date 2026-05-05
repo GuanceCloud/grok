@@ -96,6 +96,7 @@ type structuredParser struct {
 	charClass     *asciiCharClass
 	allowEmpty    bool
 	dotAll        bool
+	singleChar    bool
 	nextLiteral   string
 	nextParser    structuredKind
 	hasNextParser bool
@@ -106,6 +107,8 @@ type structuredParser struct {
 type asciiCharClass = internalmatch.ASCIICharClass
 
 type structuredKind = internalmatch.StructuredKind
+
+const structuredMaxExpandedRepeat = 16
 
 const (
 	structuredWord               = internalmatch.StructuredWord
@@ -583,6 +586,22 @@ func isDeterministicOptionalStep(steps []structuredStep, idx int) bool {
 		return false
 	}
 	if step.parser != nil {
+		if step.parser.wrapPrefix != "" {
+			curPrefix, ok := firstStructuredLiteral(step)
+			if !ok || curPrefix == "" {
+				return false
+			}
+			nextPrefix := ""
+			if steps[idx].nextIR.FirstLiteralExact {
+				nextPrefix = steps[idx].nextIR.FirstLiteral
+			}
+			if nextPrefix == "" {
+				return false
+			}
+			return curPrefix != nextPrefix &&
+				!strings.HasPrefix(curPrefix, nextPrefix) &&
+				!strings.HasPrefix(nextPrefix, curPrefix)
+		}
 		return (step.parser.nextLiteral != "" && !step.parser.allowEmpty) ||
 			canSkipOptionalParser(step.parser)
 	}
@@ -993,11 +1012,9 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 	if err != nil || !ok {
 		return nil, pos, false
 	}
-	next := end + 1
-	optional := false
-	if next < len(pattern) && pattern[next] == '?' {
-		optional = true
-		next++
+	min, max, next, ok := parseStructuredRepeat(pattern, end+1)
+	if !ok {
+		return nil, pos, false
 	}
 
 	if kind, primitive := structuredPrimitiveKind(ref.syntax); primitive && canUseStructuredPrimitive(ref.syntax, storage) {
@@ -1005,9 +1022,12 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 		if ref.alias != "" && dstIndex < 0 {
 			return nil, pos, false
 		}
+		if !(min == 1 && max == 1) && !(min == 0 && max == 1) {
+			return nil, pos, false
+		}
 		return []structuredStep{{
 			captureIndex: -1,
-			optional:     optional,
+			optional:     min == 0 && max == 1,
 			parser: &structuredParser{
 				alias:      ref.alias,
 				dstIndex:   dstIndex,
@@ -1026,7 +1046,7 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 		return nil, pos, false
 	}
 
-	if ref.alias == "" && ref.varType == "" && !optional {
+	if ref.alias == "" && ref.varType == "" && min == 1 && max == 1 {
 		return childSteps, next, true
 	}
 
@@ -1034,16 +1054,20 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 	if ref.alias != "" && dstIndex < 0 {
 		return nil, pos, false
 	}
-	if !optional {
+	optional := min == 0 && max == 1
+	if !optional && min == 1 && max == 1 {
 		if inlined, ok := inlineAliasedStructuredSteps(childSteps, dstIndex); ok {
 			return inlined, next, true
 		}
 	}
-	return []structuredStep{{
+	repeated := expandStructuredRepeat(structuredStep{
 		submatcher:   &structuredMatcher{steps: childSteps},
 		captureIndex: dstIndex,
-		optional:     optional,
-	}}, next, true
+	}, min, max, false)
+	if repeated == nil {
+		return nil, pos, false
+	}
+	return repeated, next, true
 }
 
 func inlineAliasedStructuredSteps(steps []structuredStep, dstIndex int) ([]structuredStep, bool) {
@@ -1085,13 +1109,13 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	}
 	next++
 
-	optional := false
-	if next < len(pattern) && pattern[next] == '?' {
-		optional = true
-		next++
+	min, max, next, ok := parseStructuredRepeat(pattern, next)
+	if !ok {
+		return nil, pos, false
 	}
+	optional := min == 0 && max == 1
 
-	if len(alts) == 1 && !optional {
+	if len(alts) == 1 && min == 1 && max == 1 {
 		return alts[0], next, true
 	}
 	if len(alts) == 1 && optional {
@@ -1101,7 +1125,6 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	}
 
 	step := structuredStep{
-		optional:     optional,
 		captureIndex: -1,
 	}
 	if len(alts) == 1 {
@@ -1109,7 +1132,11 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	} else {
 		step.alternatives = buildAlternativeMatchers(alts)
 	}
-	return []structuredStep{step}, next, true
+	repeated := expandStructuredRepeat(step, min, max, true)
+	if repeated == nil && max != 0 {
+		return nil, pos, false
+	}
+	return repeated, next, true
 }
 
 func flattenOptionalStructuredGroup(steps []structuredStep) ([]structuredStep, bool) {
@@ -1468,12 +1495,12 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 			if end >= len(raw) {
 				return nil, false
 			}
-			step, consumed, ok := compileSimpleCharClass(raw, i, end)
+			classSteps, consumed, ok := compileSimpleCharClass(raw, i, end)
 			if !ok {
 				return nil, false
 			}
 			flushLiteral()
-			steps = append(steps, step)
+			steps = append(steps, classSteps...)
 			i = consumed
 			continue
 		case ']', '{', '}', '+', '*', '?':
@@ -1497,18 +1524,19 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 	return steps, true
 }
 
-func compileSimpleCharClass(raw string, start, end int) (structuredStep, int, bool) {
+func compileSimpleCharClass(raw string, start, end int) ([]structuredStep, int, bool) {
 	spec := raw[start+1 : end]
 	if spec == "" {
-		return structuredStep{}, 0, false
+		return nil, 0, false
+	}
+
+	class, ok := buildASCIICharClass(spec)
+	if !ok {
+		return nil, 0, false
 	}
 
 	if end+1 < len(raw) && (raw[end+1] == '*' || raw[end+1] == '+') {
-		class, ok := buildASCIICharClass(spec)
-		if !ok {
-			return structuredStep{}, 0, false
-		}
-		return structuredStep{
+		return []structuredStep{{
 			captureIndex: -1,
 			parser: &structuredParser{
 				dstIndex:   -1,
@@ -1516,33 +1544,75 @@ func compileSimpleCharClass(raw string, start, end int) (structuredStep, int, bo
 				charClass:  class,
 				allowEmpty: raw[end+1] == '*',
 			},
-		}, end + 1, true
+		}}, end + 1, true
 	}
 
-	options := make([]*structuredMatcher, 0, len(spec))
-	for i := 0; i < len(spec); i++ {
-		c := spec[i]
-		if c == '\\' {
-			if i+1 >= len(spec) {
-				return structuredStep{}, 0, false
-			}
-			i++
-			c = spec[i]
+	base := structuredStep{
+		captureIndex: -1,
+		parser: &structuredParser{
+			dstIndex:   -1,
+			kind:       structuredCharClass,
+			charClass:  class,
+			singleChar: true,
+		},
+	}
+
+	return []structuredStep{base}, end, true
+}
+
+func parseStructuredRepeat(pattern string, pos int) (int, int, int, bool) {
+	if pos >= len(pattern) {
+		return 1, 1, pos, true
+	}
+
+	switch pattern[pos] {
+	case '?':
+		next := pos + 1
+		if next < len(pattern) && pattern[next] == '?' {
+			return 0, 0, 0, false
 		}
-		switch c {
-		case '^', '-', '[', ']':
-			return structuredStep{}, 0, false
+		return 0, 1, next, true
+	case '{':
+		min, max, next, err := parseRepeatBounds(pattern, pos)
+		if err != nil {
+			return 0, 0, 0, false
 		}
-		options = append(options, &structuredMatcher{
-			steps: []structuredStep{{literal: string(c), captureIndex: -1}},
-		})
+		if next < len(pattern) && pattern[next] == '?' {
+			return 0, 0, 0, false
+		}
+		return min, max, next, true
+	case '*', '+':
+		return 0, 0, 0, false
+	default:
+		return 1, 1, pos, true
+	}
+}
+
+func expandStructuredRepeat(base structuredStep, min, max int, allowInlineZero bool) []structuredStep {
+	if min < 0 || max < min || max < 0 || max > structuredMaxExpandedRepeat {
+		return nil
+	}
+	if max == 0 {
+		if allowInlineZero {
+			return []structuredStep{}
+		}
+		return nil
+	}
+	if min == 1 && max == 1 {
+		return []structuredStep{base}
+	}
+	if min == 0 && max == 1 {
+		base.optional = true
+		return []structuredStep{base}
 	}
 
-	if len(options) == 0 {
-		return structuredStep{}, 0, false
+	out := make([]structuredStep, 0, max)
+	for i := 0; i < max; i++ {
+		step := base
+		step.optional = i >= min
+		out = append(out, step)
 	}
-
-	return structuredStep{alternatives: options, captureIndex: -1}, end, true
+	return out
 }
 
 func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
@@ -1720,13 +1790,21 @@ func (m structuredMatcher) prefersStartOnly() bool {
 }
 
 func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, trimSpace bool) bool {
-	if pos == 0 && m.startOnlyRunner {
-		if pos == 0 && m.accessRunner != nil {
-			if m.accessRunner.run(dst, content, trimSpace) {
-				return true
-			}
-			resetStringResults(dst)
+	if m.accessRunner != nil {
+		if m.accessRunner.run(dst, content[pos:], trimSpace) {
+			return true
 		}
+		resetStringResults(dst)
+		return false
+	}
+	if m.tomcatRunner != nil {
+		if m.tomcatRunner.run(dst, content[pos:], trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+		return false
+	}
+	if pos == 0 && m.startOnlyRunner {
 		if pos == 0 && m.commonRunner != nil {
 			if m.commonRunner.run(dst, content, trimSpace) {
 				return true
@@ -1735,12 +1813,6 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 		}
 		if pos == 0 && m.jenkinsRunner != nil {
 			if m.jenkinsRunner.run(dst, content, trimSpace) {
-				return true
-			}
-			resetStringResults(dst)
-		}
-		if pos == 0 && m.tomcatRunner != nil {
-			if m.tomcatRunner.run(dst, content, trimSpace) {
 				return true
 			}
 			resetStringResults(dst)
@@ -1849,13 +1921,21 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 }
 
 func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) bool {
-	if pos == 0 && m.startOnlyRunner {
-		if pos == 0 && m.accessRunner != nil {
-			if m.accessRunner.runTyped(dst, content, trimSpace, kinds) {
-				return true
-			}
-			resetAnyResults(dst)
+	if m.accessRunner != nil {
+		if m.accessRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
 		}
+		resetAnyResults(dst)
+		return false
+	}
+	if m.tomcatRunner != nil {
+		if m.tomcatRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+		return false
+	}
+	if pos == 0 && m.startOnlyRunner {
 		if pos == 0 && m.commonRunner != nil {
 			if m.commonRunner.runTyped(dst, content, trimSpace, kinds) {
 				return true
@@ -1864,12 +1944,6 @@ func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, t
 		}
 		if pos == 0 && m.jenkinsRunner != nil {
 			if m.jenkinsRunner.runTyped(dst, content, trimSpace, kinds) {
-				return true
-			}
-			resetAnyResults(dst)
-		}
-		if pos == 0 && m.tomcatRunner != nil {
-			if m.tomcatRunner.runTyped(dst, content, trimSpace, kinds) {
 				return true
 			}
 			resetAnyResults(dst)
@@ -3028,6 +3102,9 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		case structuredURIPathParam:
 			return sliceURIPathParam(content, pos)
 		case structuredCharClass:
+			if p.singleChar {
+				return sliceSingleCharClass(content, pos, p.charClass)
+			}
 			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredNotSpace:
 			return sliceNotSpaceWithContext(content, pos, p.nextParser, p.nextLiteral)
@@ -3111,6 +3188,9 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 	case structuredURIPathParam:
 		return sliceURIPathParam(content, pos)
 	case structuredCharClass:
+		if p.singleChar {
+			return sliceSingleCharClass(content, pos, p.charClass)
+		}
 		return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 	case structuredNotSpace:
 		return sliceNotSpace(content, pos)
@@ -3228,6 +3308,13 @@ func sliceCharClass(content string, pos int, class *asciiCharClass, allowEmpty b
 	return content[start:pos], pos, true
 }
 
+func sliceSingleCharClass(content string, pos int, class *asciiCharClass) (string, int, bool) {
+	if class == nil || pos >= len(content) || !class.Table[content[pos]] {
+		return "", 0, false
+	}
+	return content[pos : pos+1], pos + 1, true
+}
+
 func sliceNotSpace(content string, pos int) (string, int, bool) {
 	start := pos
 	for pos < len(content) && !isASCIISpace(content[pos]) {
@@ -3317,7 +3404,9 @@ func sliceNotSpaceWithContext(content string, pos int, nextParser structuredKind
 
 func sliceNumber(content string, pos int) (string, int, bool) {
 	start := pos
+	signed := false
 	if pos < len(content) && (content[pos] == '+' || content[pos] == '-') {
+		signed = true
 		pos++
 	}
 	digitsStart := pos
@@ -3325,7 +3414,7 @@ func sliceNumber(content string, pos int) (string, int, bool) {
 		pos++
 	}
 	if pos == digitsStart {
-		if pos >= len(content) || content[pos] != '.' {
+		if signed || pos >= len(content) || content[pos] != '.' {
 			return "", 0, false
 		}
 		pos++

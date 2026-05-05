@@ -55,13 +55,18 @@ func isApacheNumber(s string) bool {
 	}
 
 	i := 0
+	signed := false
 	if s[0] == '+' || s[0] == '-' {
+		signed = true
 		i++
 		if i == len(s) {
 			return false
 		}
 	}
 	if s[i] == '.' {
+		if signed {
+			return false
+		}
 		i++
 		if i == len(s) {
 			return false

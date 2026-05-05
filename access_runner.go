@@ -20,6 +20,11 @@ type accessLogRunner struct {
 	versionIdx  int
 	statusIdx   int
 	bytesIdx    int
+	clientKind  structuredKind
+	identKind   structuredKind
+	authKind    structuredKind
+	methodKind  structuredKind
+	urlKind     structuredKind
 	statusKind  structuredKind
 	bytesKind   structuredKind
 	versionKind structuredKind
@@ -30,9 +35,12 @@ func compileAccessRunner(steps []structuredStep) (*accessLogRunner, bool) {
 		return &accessLogRunner{
 			mode:        accessRunnerModeApacheFixture,
 			clientIdx:   steps[0].parser.dstIndex,
+			clientKind:  steps[0].parser.kind,
 			timeIdx:     steps[1].parser.dstIndex,
 			methodIdx:   steps[2].parser.dstIndex,
+			methodKind:  steps[2].parser.kind,
 			urlIdx:      steps[4].parser.dstIndex,
+			urlKind:     steps[4].parser.kind,
 			versionIdx:  steps[5].parser.dstIndex,
 			versionKind: steps[5].parser.kind,
 			statusIdx:   steps[6].parser.dstIndex,
@@ -47,11 +55,16 @@ func compileAccessRunner(steps []structuredStep) (*accessLogRunner, bool) {
 		return &accessLogRunner{
 			mode:        accessRunnerModeSimple,
 			clientIdx:   steps[0].parser.dstIndex,
+			clientKind:  steps[0].parser.kind,
 			identIdx:    steps[1].parser.dstIndex,
+			identKind:   steps[1].parser.kind,
 			authIdx:     steps[2].parser.dstIndex,
+			authKind:    steps[2].parser.kind,
 			timeIdx:     steps[3].parser.dstIndex,
 			methodIdx:   steps[4].parser.dstIndex,
+			methodKind:  steps[4].parser.kind,
 			urlIdx:      steps[6].parser.dstIndex,
+			urlKind:     steps[6].parser.kind,
 			versionIdx:  steps[7].parser.dstIndex,
 			versionKind: steps[7].parser.kind,
 			statusIdx:   steps[8].parser.dstIndex,
@@ -97,15 +110,15 @@ type accessMatch struct {
 func (r *accessLogRunner) match(content string) (accessMatch, bool) {
 	switch r.mode {
 	case accessRunnerModeSimple:
-		return matchSimpleAccess(content, r.statusKind, r.bytesKind, r.versionKind)
+		return r.matchSimple(content)
 	case accessRunnerModeApacheFixture:
-		return matchApacheFixtureAccess(content, r.statusKind, r.versionKind)
+		return r.matchApacheFixture(content)
 	default:
 		return accessMatch{}, false
 	}
 }
 
-func matchSimpleAccess(content string, statusKind, bytesKind, versionKind structuredKind) (accessMatch, bool) {
+func (r *accessLogRunner) matchSimple(content string) (accessMatch, bool) {
 	var out accessMatch
 	pos := 0
 
@@ -114,13 +127,16 @@ func matchSimpleAccess(content string, statusKind, bytesKind, versionKind struct
 		return accessMatch{}, false
 	}
 	out.client = content[:nextSpace]
+	if !structuredSegmentMatchesKind(out.client, r.clientKind) {
+		return accessMatch{}, false
+	}
 	pos = nextSpace + 1
 
-	out.ident, pos = consumeTokenAt(content, pos)
+	out.ident, pos = consumeAccessTokenAt(content, pos, r.identKind)
 	if pos <= 0 {
 		return accessMatch{}, false
 	}
-	out.auth, pos = consumeTokenAt(content, pos)
+	out.auth, pos = consumeAccessTokenAt(content, pos, r.authKind)
 	if pos <= 0 {
 		return accessMatch{}, false
 	}
@@ -145,6 +161,9 @@ func matchSimpleAccess(content string, statusKind, bytesKind, versionKind struct
 		return accessMatch{}, false
 	}
 	out.method = content[pos : pos+nextSpace]
+	if !structuredSegmentMatchesKind(out.method, r.methodKind) {
+		return accessMatch{}, false
+	}
 	pos += nextSpace + 1
 
 	relHTTP := lastLiteralIndex(content[pos:], ` HTTP/`)
@@ -152,34 +171,40 @@ func matchSimpleAccess(content string, statusKind, bytesKind, versionKind struct
 		return accessMatch{}, false
 	}
 	out.url = content[pos : pos+relHTTP]
+	if !structuredSegmentMatchesKind(out.url, r.urlKind) {
+		return accessMatch{}, false
+	}
 	pos += relHTTP + len(` HTTP/`)
 
-	out.version, pos, ok = consumeNumericAt(content, pos, versionKind)
+	out.version, pos, ok = consumeNumericAt(content, pos, r.versionKind)
 	if !ok || !strings.HasPrefix(content[pos:], `" `) {
 		return accessMatch{}, false
 	}
 	pos += 2
 
-	out.status, pos, ok = consumeNumericAt(content, pos, statusKind)
+	out.status, pos, ok = consumeNumericAt(content, pos, r.statusKind)
 	if !ok || pos >= len(content) || content[pos] != ' ' {
 		return accessMatch{}, false
 	}
 	pos++
 
-	out.bytes, pos, ok = consumeNumericAt(content, pos, bytesKind)
+	out.bytes, pos, ok = consumeNumericAt(content, pos, r.bytesKind)
 	if !ok {
 		return accessMatch{}, false
 	}
 	return out, true
 }
 
-func matchApacheFixtureAccess(content string, statusKind, versionKind structuredKind) (accessMatch, bool) {
+func (r *accessLogRunner) matchApacheFixture(content string) (accessMatch, bool) {
 	var out accessMatch
 	rel := strings.Index(content, ` - - [`)
 	if rel <= 0 {
 		return accessMatch{}, false
 	}
 	out.client = content[:rel]
+	if !structuredSegmentMatchesKind(out.client, r.clientKind) {
+		return accessMatch{}, false
+	}
 	pos := rel + len(` - - [`)
 
 	next, ok := consumeHTTPDate(content, pos)
@@ -198,6 +223,9 @@ func matchApacheFixtureAccess(content string, statusKind, versionKind structured
 		return accessMatch{}, false
 	}
 	out.method = content[pos : pos+nextSpace]
+	if !structuredSegmentMatchesKind(out.method, r.methodKind) {
+		return accessMatch{}, false
+	}
 	pos += nextSpace + 1
 
 	relHTTP := lastLiteralIndex(content[pos:], ` HTTP/`)
@@ -205,22 +233,25 @@ func matchApacheFixtureAccess(content string, statusKind, versionKind structured
 		return accessMatch{}, false
 	}
 	out.url = content[pos : pos+relHTTP]
+	if !structuredSegmentMatchesKind(out.url, r.urlKind) {
+		return accessMatch{}, false
+	}
 	pos += relHTTP + len(` HTTP/`)
 
-	out.version, pos, ok = consumeNumericAt(content, pos, versionKind)
+	out.version, pos, ok = consumeNumericAt(content, pos, r.versionKind)
 	if !ok || !strings.HasPrefix(content[pos:], `" `) {
 		return accessMatch{}, false
 	}
 	pos += 2
 
-	out.status, pos, ok = consumeNumericAt(content, pos, statusKind)
+	out.status, pos, ok = consumeNumericAt(content, pos, r.statusKind)
 	if !ok || pos >= len(content) || content[pos] != ' ' {
 		return accessMatch{}, false
 	}
 	return out, true
 }
 
-func consumeTokenAt(content string, pos int) (string, int) {
+func consumeAccessTokenAt(content string, pos int, kind structuredKind) (string, int) {
 	if pos >= len(content) {
 		return "", -1
 	}
@@ -231,7 +262,24 @@ func consumeTokenAt(content string, pos int) (string, int) {
 	if end == pos || end >= len(content) {
 		return "", -1
 	}
-	return content[pos:end], end + 1
+	token := content[pos:end]
+	if !structuredSegmentMatchesKind(token, kind) {
+		return "", -1
+	}
+	return token, end + 1
+}
+
+func consumeTokenAt(content string, pos int) (string, int) {
+	return consumeAccessTokenAt(content, pos, structuredNotSpace)
+}
+
+func structuredSegmentMatchesKind(segment string, kind structuredKind) bool {
+	if segment == "" {
+		return false
+	}
+	parser := structuredParser{kind: kind}
+	next, _, ok := parser.consume(segment, 0)
+	return ok && next == len(segment)
 }
 
 func consumeNumericAt(content string, pos int, kind structuredKind) (string, int, bool) {

@@ -29,6 +29,12 @@ type datakitMatchedFixture struct {
 	regexpOnly *GrokRegexp
 }
 
+type datakitPipelineExample struct {
+	name     string
+	line     string
+	pipeline *datakitCompiledPipeline
+}
+
 func TestDatakitFixturesMatchRegexp(t *testing.T) {
 	fixtures, unmatched := loadMatchedDatakitFixtures(t)
 	if len(fixtures) == 0 {
@@ -78,6 +84,49 @@ func BenchmarkDatakitFixtures(b *testing.B) {
 	}
 }
 
+func BenchmarkDatakitPipelineFirstMatchRegexpPath(b *testing.B) {
+	examples := loadDatakitPipelineExamples(b)
+	if len(examples) == 0 {
+		b.Fatal("expected datakit pipeline examples")
+	}
+
+	b.Run("prefilter", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			example := examples[i%len(examples)]
+			idx, ret, _, err := firstMatchingPattern(example.line, example.pipeline, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx < 0 || len(ret) == 0 {
+				b.Fatal("expected match")
+			}
+		}
+	})
+
+	b.Run("no_prefilter", func(b *testing.B) {
+		withoutPrefilter := make([]datakitPipelineExample, len(examples))
+		for i, example := range examples {
+			withoutPrefilter[i] = datakitPipelineExample{
+				name:     example.name,
+				line:     example.line,
+				pipeline: cloneCompiledPipelineWithoutRegexpPrefilter(example.pipeline),
+			}
+		}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			example := withoutPrefilter[i%len(withoutPrefilter)]
+			idx, ret, _, err := firstMatchingPattern(example.line, example.pipeline, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if idx < 0 || len(ret) == 0 {
+				b.Fatal("expected match")
+			}
+		}
+	})
+}
+
 func loadMatchedDatakitFixtures(t testing.TB) ([]datakitMatchedFixture, []string) {
 	t.Helper()
 
@@ -113,6 +162,37 @@ func loadMatchedDatakitFixtures(t testing.TB) ([]datakitMatchedFixture, []string
 	}
 
 	return fixtures, unmatched
+}
+
+func loadDatakitPipelineExamples(t testing.TB) []datakitPipelineExample {
+	t.Helper()
+
+	cases := loadDatakitFixtureCases(t)
+	examples := make([]datakitPipelineExample, 0, len(cases))
+
+	for _, c := range cases {
+		for pipelineName, script := range c.Pipelines {
+			compiled, err := compileDatakitPipeline(script)
+			if err != nil {
+				t.Fatalf("%s/%s compile pipeline: %v", c.Collector, pipelineName, err)
+			}
+			if len(compiled.patterns) == 0 {
+				continue
+			}
+
+			for exampleGroup, group := range c.Examples {
+				for exampleName, line := range group {
+					examples = append(examples, datakitPipelineExample{
+						name:     sanitizeFixtureName(c.Collector + "/" + pipelineName + "/" + exampleGroup + "/" + exampleName),
+						line:     line,
+						pipeline: compiled,
+					})
+				}
+			}
+		}
+	}
+
+	return examples
 }
 
 func compileDatakitPipeline(script string) (*datakitCompiledPipeline, error) {
@@ -332,6 +412,51 @@ func BenchmarkDatakitPipelineDispatch(b *testing.B) {
 		nextPipeline:
 		}
 	}
+}
+
+func cloneCompiledPatternsWithoutRegexpPrefilter(src []datakitCompiledPattern) []datakitCompiledPattern {
+	out := make([]datakitCompiledPattern, len(src))
+	copy(out, src)
+	for i := range out {
+		out[i].current = cloneGrokWithoutRegexpPrefilter(out[i].current)
+		out[i].regexpOnly = cloneGrokWithoutRegexpPrefilter(out[i].regexpOnly)
+	}
+	return out
+}
+
+func cloneCompiledPipelineWithoutRegexpPrefilter(src *datakitCompiledPipeline) *datakitCompiledPipeline {
+	if src == nil {
+		return nil
+	}
+	patterns := cloneCompiledPatternsWithoutRegexpPrefilter(src.patterns)
+	currentSet, err := buildDatakitMatcherSet(patterns, false)
+	if err != nil {
+		panic(err)
+	}
+	regexpSet, err := buildDatakitMatcherSet(patterns, true)
+	if err != nil {
+		panic(err)
+	}
+	return &datakitCompiledPipeline{
+		patterns:   patterns,
+		currentSet: currentSet,
+		regexpSet:  regexpSet,
+	}
+}
+
+func cloneGrokWithoutRegexpPrefilter(g *GrokRegexp) *GrokRegexp {
+	if g == nil {
+		return nil
+	}
+	clone := *g
+	clone.prefilter = nil
+	clone.multiFilter = nil
+	clone.filter = nil
+	clone.requiredPrefix = ""
+	clone.requiredSuffix = ""
+	clone.requiredLiterals = nil
+	clone.minMatchLength = 0
+	return &clone
 }
 
 func extractPipelineQuotedArgs(line string) ([]string, error) {

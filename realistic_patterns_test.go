@@ -113,6 +113,61 @@ func TestRealisticPatternsMatchRegexp(t *testing.T) {
 	}
 }
 
+func TestRealisticPatternsMutationParity(t *testing.T) {
+	extraLines := map[string][]string{
+		"business_order_logfmt": {
+			`time=2026-04-24T10:31:42.123+08:00 level=INFO service=order-api trace_id=4f8c9c1b0d9a user_id=10086 order_id=ORD-20260424-00042 amount=+.95 latency_ms=12.7 msg="created order from checkout"`,
+			`time=2026-04-24T10:31:42.123+08:00 level=INFO service=order-api trace_id=4f8c9c1b0d9a user_id=10086 order_id=ORD-20260424-00042 amount=319.95 latency_ms= msg="created order from checkout"`,
+		},
+		"business_payment_worker": {
+			`2026-04-24T10:31:42.456+08:00 INFO worker=payment-settle-3 tenant=shop-cn order_id=ORD-20260424-00042 payment_id=PAY-99a01 amount=.95 currency=CNY status=confirmed cost=8.4ms`,
+			`2026-04-24T10:31:42.456+08:00 INFO worker=payment-settle-3 tenant=shop-cn order_id=ORD-20260424-00042 payment_id=PAY-99a01 amount=319.95 currency=CNY status=confirmed cost=+.4ms`,
+		},
+		"api_gateway_access": {
+			`prefix 10.20.30.40 POST /api/v1/orders?channel=app status=201 bytes=532 duration=12.4 trace=4f8c9c1b0d9a`,
+			`10.20.30.40 POST /api/v1/orders?channel=app status=201 bytes=532 duration=+.4 trace=4f8c9c1b0d9a`,
+		},
+		"java_order_service": {
+			`2026-04-24 10:31:42,789 [WARN] [http-nio-8080-exec-7] com.demo.OrderService - order_id=ORD-20260424-00042 user_id=10086`,
+			`2026-04-24 10:31:42,789 [WARN] [] com.demo.OrderService - order_id=ORD-20260424-00042 user_id=10086 inventory reservation timeout after 200ms`,
+		},
+		"python_gunicorn_order_access": {
+			`prefix 10.20.30.40 - - [24/Apr/2026:10:31:42 +0800] "POST /api/v1/orders?channel=app HTTP/1.1" 201 532 "-" "Mozilla/5.0 checkout-app/8.6.1"`,
+			`10.20.30.40  - [24/Apr/2026:10:31:42 +0800] "POST /api/v1/orders?channel=app HTTP/1.1" 201 532 "-" "Mozilla/5.0 checkout-app/8.6.1"`,
+			`10.20.30.40 - - [24/Apr/2026:10:31:42 +0800] "POST /api/v1/orders?channel=app HTTP/+.1" 201 532 "-" "Mozilla/5.0 checkout-app/8.6.1"`,
+		},
+		"k8s_controller_runtime": {
+			`2026-04-24T10:31:42Z INFO controller-runtime.manager reconciled object controller=orders resource=apps/v1, Kind=Deployment name=order-api`,
+			`2026-04-24T10:31:42Z INFO controller-runtime.manager  controller=orders resource=apps/v1, Kind=Deployment name=order-api namespace=prod`,
+		},
+		"syslog_auth_failure": {
+			`Apr 24 10:31:42 edge-01 sshd: Failed password for invalid user admin from 203.0.113.9 port 54022 ssh2`,
+			`Apr 24 10:31:42 edge-01 sshd[]: Failed password for invalid user admin from 203.0.113.9 port 54022 ssh2`,
+		},
+		"db_slow_query": {
+			`2026-04-24T10:31:42.981+08:00 183742 SELECT`,
+			`2026-04-24T10:31:42.981+08:00 x SELECT SELECT * FROM orders`,
+		},
+		"optional_trace_worker": {
+			`2026-04-24T10:31:42+08:00 INFO worker=inventory-sync-1 msg=reservation refreshed successfully`,
+			`2026-04-24T10:31:42+08:00 INFO worker=inventory-sync-1 trace= msg=reservation refreshed successfully`,
+		},
+		"message_queue_consumer": {
+			`2026-04-24T10:31:42.222Z level=INFO topic=order-events partition=12 offset=992331 group=checkout-consumer lag=3 msg=""`,
+			`2026-04-24T10:31:42.222Z level=INFO topic=order-events partition=12 offset=992331 group=checkout-consumer lag=x msg="processed order created event"`,
+		},
+	}
+
+	for _, fixture := range loadRealisticPatternFixtures(t) {
+		lines := append([]string{fixture.line, fixture.line + "\n"}, extraLines[fixture.name]...)
+		for idx, line := range lines {
+			t.Run(fixture.name, func(t *testing.T) {
+				assertRunParity(t, fixture.current, fixture.regexpOnly, line, idx != 0)
+			})
+		}
+	}
+}
+
 func BenchmarkRealisticPatterns(b *testing.B) {
 	fixtures := loadRealisticPatternFixtures(b)
 	if len(fixtures) == 0 {

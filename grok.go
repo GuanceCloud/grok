@@ -21,15 +21,19 @@ type SubMatchName struct {
 }
 
 type GrokRegexp struct {
-	grokPattern   *GrokPattern
-	re            *regexp.Regexp
-	filter        *regexpFilter
-	subMatchNames SubMatchName
-	nameIndex     map[string]int
-	valueKinds    []valueKind
-	fastMatcher   *structuredMatcher
-	prefilter     *regexpPrefilter
-	multiFilter   multiPatternFilter
+	grokPattern      *GrokPattern
+	re               *regexp.Regexp
+	filter           *regexpFilter
+	subMatchNames    SubMatchName
+	nameIndex        map[string]int
+	valueKinds       []valueKind
+	fastMatcher      *structuredMatcher
+	prefilter        *regexpPrefilter
+	multiFilter      multiPatternFilter
+	requiredPrefix   string
+	requiredSuffix   string
+	requiredLiterals []string
+	minMatchLength   int
 }
 
 type valueKind uint8

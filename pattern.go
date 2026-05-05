@@ -348,6 +348,7 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	if err != nil {
 		return nil, err
 	}
+	requiredPrefix, requiredSuffix, requiredLiterals, minMatchLength := compilePatternPrefilterIR(gP.pattern, storage)
 
 	valueKinds := make([]valueKind, len(meta.subMatchNames.name))
 	for i, name := range meta.subMatchNames.name {
@@ -364,15 +365,19 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	}
 
 	return &GrokRegexp{
-		grokPattern:   gP,
-		re:            meta.re,
-		filter:        meta.filter,
-		subMatchNames: meta.subMatchNames,
-		nameIndex:     meta.nameIndex,
-		valueKinds:    valueKinds,
-		fastMatcher:   buildFastMatcher(gP, storage, meta),
-		prefilter:     meta.prefilter,
-		multiFilter:   meta.multiFilter,
+		grokPattern:      gP,
+		re:               meta.re,
+		filter:           meta.filter,
+		subMatchNames:    meta.subMatchNames,
+		nameIndex:        meta.nameIndex,
+		valueKinds:       valueKinds,
+		fastMatcher:      buildFastMatcher(gP, storage, meta),
+		prefilter:        meta.prefilter,
+		multiFilter:      meta.multiFilter,
+		requiredPrefix:   requiredPrefix,
+		requiredSuffix:   requiredSuffix,
+		requiredLiterals: requiredLiterals,
+		minMatchLength:   minMatchLength,
 	}, nil
 }
 
