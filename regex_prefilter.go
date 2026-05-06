@@ -34,7 +34,7 @@ func buildRegexpPrefilter(expr string, re *regexp.Regexp) *regexpPrefilter {
 		} else {
 			pf.literalPrefix = prefix
 		}
-	} else {
+	} else if !hasFoldCaseLiteral(parsed) {
 		prefix, _ := re.LiteralPrefix()
 		if hasRegexpStartAnchor(expr) && prefix != "" {
 			pf.anchoredPrefix = prefix
@@ -62,6 +62,21 @@ func buildRegexpPrefilter(expr string, re *regexp.Regexp) *regexpPrefilter {
 		return nil
 	}
 	return pf
+}
+
+func hasFoldCaseLiteral(re *syntax.Regexp) bool {
+	if re == nil {
+		return false
+	}
+	if re.Op == syntax.OpLiteral && re.Flags&syntax.FoldCase != 0 {
+		return true
+	}
+	for _, sub := range re.Sub {
+		if hasFoldCaseLiteral(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func (pf *regexpPrefilter) rejects(content string) bool {
@@ -212,11 +227,11 @@ func hasExactTextAnchors(re *syntax.Regexp) bool {
 }
 
 func isRegexpStartAnchor(re *syntax.Regexp) bool {
-	return re != nil && (re.Op == syntax.OpBeginText || re.Op == syntax.OpBeginLine)
+	return re != nil && re.Op == syntax.OpBeginText
 }
 
 func isRegexpEndAnchor(re *syntax.Regexp) bool {
-	return re != nil && (re.Op == syntax.OpEndText || re.Op == syntax.OpEndLine)
+	return re != nil && re.Op == syntax.OpEndText
 }
 
 func regexpLiteralPrefix(re *syntax.Regexp) (string, bool) {
@@ -225,6 +240,9 @@ func regexpLiteralPrefix(re *syntax.Regexp) (string, bool) {
 	}
 	switch re.Op {
 	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return "", false
+		}
 		return string(re.Rune), false
 	case syntax.OpCapture:
 		return regexpLiteralPrefix(re.Sub[0])

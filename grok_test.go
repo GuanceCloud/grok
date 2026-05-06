@@ -593,6 +593,74 @@ func TestRunToReusesCallerBuffer(t *testing.T) {
 	assert.Equal(t, &buf[:2][0], &ret[0])
 }
 
+func TestStructuredWordBeforeLiteralPreservesRegexpValidation(t *testing.T) {
+	pattern := `%{WORD:w} %{NUMBER:n}`
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	fastRet, fastErr := current.Run(": 9", true)
+	regexpRet, regexpErr := regexpOnly.Run(": 9", true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredURIHostWithPortMatchesRegexpCaptures(t *testing.T) {
+	pattern := `%{URIHOST:h}`
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := "example.com:8080"
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, "example.com:8080", fastRet[current.nameIndex["h"]])
+	assert.Equal(t, "8080", fastRet[current.nameIndex["port"]])
+}
+
+func TestStructuredIPOrHostPreservesIPv6ZoneIdentifier(t *testing.T) {
+	pattern := `%{IPORHOST:h}`
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := "fe80::1%eth0"
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, line, fastRet[current.nameIndex["h"]])
+}
+
 func TestTerminalGreedyDataDoesNotCrossNewline(t *testing.T) {
 	pattern := `%{WORD:name} %{GREEDYDATA:msg}`
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
@@ -1824,6 +1892,47 @@ func TestRegexpPrefilterAnchoredPrefix(t *testing.T) {
 	if _, err := g.Run("foobar", true); err != nil {
 		t.Fatalf("expected match, got %v", err)
 	}
+}
+
+func TestRegexpPrefilterMultilineLineAnchorsDoNotRejectInnerLine(t *testing.T) {
+	g, err := CompilePattern(`(?m)^foo$`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	content := "bar\nfoo\nbaz"
+	if g.prefilter != nil {
+		if g.prefilter.anchoredPrefix != "" {
+			t.Fatalf("line anchor produced anchoredPrefix %q", g.prefilter.anchoredPrefix)
+		}
+		if g.prefilter.literalExact {
+			t.Fatal("line anchors should not produce exact whole-text prefilter")
+		}
+		if g.prefilter.rejects(content) {
+			t.Fatal("line-anchor prefilter rejected a valid multiline match")
+		}
+	}
+	if _, err := g.Run(content, true); err != nil {
+		t.Fatalf("expected multiline line-anchor match, got %v", err)
+	}
+}
+
+func TestRegexpPrefilterSkipsFoldedLiteralPrefix(t *testing.T) {
+	g, err := CompilePattern(`(?P<x>(?i)foo)`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.fastMatcher = nil
+
+	if g.prefilter != nil && g.prefilter.rejects("foo") {
+		t.Fatal("folded literal prefilter rejected a valid lowercase match")
+	}
+	ret, err := g.Run("foo", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "foo", ret[g.nameIndex["x"]])
 }
 
 func TestRegexpPrefilterLiteralSet(t *testing.T) {

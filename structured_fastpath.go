@@ -1338,7 +1338,7 @@ func structuredPrimitiveKind(syntax string) (structuredKind, bool) {
 		return structuredWord, true
 	case "HOSTNAME", "HOST":
 		return structuredHostName, true
-	case "IPORHOST", "IP", "URIHOST":
+	case "IPORHOST", "IP":
 		return structuredIPOrHost, true
 	case "NOTSPACE", "USER", "USERNAME", "PATH":
 		return structuredNotSpace, true
@@ -2966,7 +2966,7 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 
 	switch p.kind {
 	case structuredWord:
-		if segment == "" {
+		if !isWordMatchContext(content, pos, next, segment) {
 			return 0, "", false
 		}
 	case structuredURIPath, structuredURIPathParam:
@@ -3174,6 +3174,8 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			if (p.nextParser == structuredSpaceOne || p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
 				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
 			}
+		case structuredWord:
+			return sliceWord(content, pos)
 		case structuredCharClass:
 			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredTimestampISO8601:
@@ -3288,6 +3290,21 @@ func sliceWord(content string, pos int) (string, int, bool) {
 		return "", 0, false
 	}
 	return content[start:pos], pos, true
+}
+
+func isWordMatchContext(content string, start int, end int, segment string) bool {
+	if segment == "" ||
+		end-start != len(segment) ||
+		!hasRegexpWordBoundary(content, start) ||
+		!hasRegexpWordBoundary(content, end) {
+		return false
+	}
+	for i := 0; i < len(segment); i++ {
+		if !isWordByte(segment[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func sliceURIPath(content string, pos int) (string, int, bool) {
@@ -3797,6 +3814,16 @@ func sliceIPv6Like(content string, pos int) (string, int, bool) {
 done:
 	if pos == start || colons < 2 {
 		return "", 0, false
+	}
+	if pos < len(content) && content[pos] == '%' {
+		zoneStart := pos
+		pos++
+		for pos < len(content) && content[pos] != '\n' {
+			pos++
+		}
+		if pos == zoneStart+1 {
+			pos = zoneStart
+		}
 	}
 	segment := content[start:pos]
 	ipSegment := segment
