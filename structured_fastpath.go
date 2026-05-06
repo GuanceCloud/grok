@@ -177,7 +177,7 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	}
 	matcher.anchoredRunner, _ = compileAnchoredDissectRunner(steps, true)
 	matcher.accessRunner, _ = compileAccessRunner(steps)
-	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex)
+	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex, storage)
 	matcher.jenkinsRunner, _ = compileJenkinsRunner(pattern, meta.nameIndex)
 	matcher.tomcatRunner, _ = compileTomcatCatalinaRunner(pattern, meta.nameIndex)
 	matcher.mysqlRunner, _ = compileMySQLSimpleRunner(pattern, meta.nameIndex)

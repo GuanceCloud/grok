@@ -15,11 +15,18 @@ type commonApacheRunner struct {
 	bytesIdx       int
 }
 
-func compileCommonApacheRunner(pattern string, nameIndex map[string]int) (*commonApacheRunner, bool) {
+func compileCommonApacheRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*commonApacheRunner, bool) {
 	if pattern != "%{COMMONAPACHELOG}" || len(nameIndex) == 0 {
 		return nil, false
 	}
-	return &commonApacheRunner{
+	if storage == nil {
+		return nil, false
+	}
+	common, ok := storage.GetPattern("COMMONAPACHELOG")
+	if !ok || common.pattern != defalutPatterns["COMMONAPACHELOG"] {
+		return nil, false
+	}
+	runner := &commonApacheRunner{
 		clientIdx:      lookupNameIndex(nameIndex, "clientip"),
 		identIdx:       lookupNameIndex(nameIndex, "ident"),
 		authIdx:        lookupNameIndex(nameIndex, "auth"),
@@ -30,7 +37,14 @@ func compileCommonApacheRunner(pattern string, nameIndex map[string]int) (*commo
 		rawRequestIdx:  lookupNameIndex(nameIndex, "rawrequest"),
 		responseIdx:    lookupNameIndex(nameIndex, "response"),
 		bytesIdx:       lookupNameIndex(nameIndex, "bytes"),
-	}, true
+	}
+	if runner.clientIdx < 0 || runner.identIdx < 0 || runner.authIdx < 0 ||
+		runner.timestampIdx < 0 || runner.verbIdx < 0 || runner.requestIdx < 0 ||
+		runner.httpVersionIdx < 0 || runner.rawRequestIdx < 0 ||
+		runner.responseIdx < 0 || runner.bytesIdx < 0 {
+		return nil, false
+	}
+	return runner, true
 }
 
 func lookupNameIndex(nameIndex map[string]int, key string) int {

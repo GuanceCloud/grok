@@ -36,6 +36,9 @@ func TestNormalizeAnonymousCaptures(t *testing.T) {
 		{in: `(?P<name>LOG|ERROR)`, want: `(?P<name>LOG|ERROR)`},
 		{in: `\(`, want: `\(`},
 		{in: `[()]`, want: `[()]`},
+		{in: `[]()]`, want: `[]()]`},
+		{in: `[^]()]`, want: `[^]()]`},
+		{in: `[[]()`, want: `[[](?:)`},
 		{in: `((foo))\1`, want: `((foo))\1`},
 	}
 
@@ -408,6 +411,50 @@ func TestCommonApacheLogRawRequest(t *testing.T) {
 	}
 	if bytes, _ := g.GetValByName("bytes", ret); bytes != "" {
 		t.Fatalf("unexpected bytes: %q", bytes)
+	}
+}
+
+func TestCommonApacheRunnerSkipsCustomPatternDefinition(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["COMMONAPACHELOG"] = `%{WORD:foo}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	current, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.commonRunner != nil {
+		t.Fatal("custom COMMONAPACHELOG definition should not use default Apache runner")
+	}
+
+	regexpOnly, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 200 42`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Equal(t, "127", fastRet[current.nameIndex["foo"]])
+}
+
+func TestRawRegexCharClassLeadingBracketLiteralIsPreserved(t *testing.T) {
+	g, err := CompilePattern(`[]()]`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.Run(")", true); err != nil {
+		t.Fatalf("expected literal class match, got %v", err)
+	}
+	if _, err := g.Run(":", true); err != ErrMismatch {
+		t.Fatalf("expected mismatch for outside class, got %v", err)
 	}
 }
 

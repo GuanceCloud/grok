@@ -197,6 +197,7 @@ func normalizeAnonymousCaptures(raw string) string {
 	var builder strings.Builder
 	builder.Grow(len(raw))
 	inClass := false
+	classStart := false
 
 	for i := 0; i < len(raw); i++ {
 		switch raw[i] {
@@ -206,20 +207,37 @@ func normalizeAnonymousCaptures(raw string) string {
 				i++
 				builder.WriteByte(raw[i])
 			}
+			if inClass {
+				classStart = false
+			}
 		case '[':
-			inClass = true
+			if !inClass {
+				inClass = true
+				classStart = true
+			} else {
+				classStart = false
+			}
 			builder.WriteByte(raw[i])
 		case ']':
-			inClass = false
+			if inClass && !classStart {
+				inClass = false
+			}
+			classStart = false
 			builder.WriteByte(raw[i])
 		case '(':
 			if inClass || (i+1 < len(raw) && raw[i+1] == '?') {
 				builder.WriteByte(raw[i])
+				if inClass {
+					classStart = false
+				}
 				continue
 			}
 			builder.WriteString("(?:")
 		default:
 			builder.WriteByte(raw[i])
+			if inClass && !(classStart && raw[i] == '^') {
+				classStart = false
+			}
 		}
 	}
 
