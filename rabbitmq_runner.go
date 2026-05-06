@@ -10,8 +10,8 @@ type rabbitMQRunner struct {
 	msgIdx    int
 }
 
-func compileRabbitMQRunner(pattern string, steps []structuredStep) (*rabbitMQRunner, bool) {
-	if pattern != rabbitMQBracketPattern || len(steps) != 3 {
+func compileRabbitMQRunner(pattern string, steps []structuredStep, storage PatternStorageIface) (*rabbitMQRunner, bool) {
+	if pattern != rabbitMQBracketPattern || len(steps) != 3 || !defaultPatternDefinitionsMatch(storage, "DATA", "LOGLEVEL", "GREEDYDATA") {
 		return nil, false
 	}
 	if steps[0].parser == nil || steps[1].parser == nil || steps[2].parser == nil {

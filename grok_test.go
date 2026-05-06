@@ -39,6 +39,8 @@ func TestNormalizeAnonymousCaptures(t *testing.T) {
 		{in: `[]()]`, want: `[]()]`},
 		{in: `[^]()]`, want: `[^]()]`},
 		{in: `[[]()`, want: `[[](?:)`},
+		{in: `[[:digit:]()]`, want: `[[:digit:]()]`},
+		{in: `\Q(foo)\E`, want: `\Q(foo)\E`},
 		{in: `((foo))\1`, want: `((foo))\1`},
 	}
 
@@ -444,6 +446,97 @@ func TestCommonApacheRunnerSkipsCustomPatternDefinition(t *testing.T) {
 	assert.Equal(t, "127", fastRet[current.nameIndex["foo"]])
 }
 
+func TestCommonApacheRunnerSkipsOverriddenNestedDependency(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["WORD"] = `%{INT}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	current, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.commonRunner != nil {
+		t.Fatal("COMMONAPACHELOG with overridden WORD should not use default Apache runner")
+	}
+
+	regexpOnly, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+	assert.Empty(t, fastRet[current.nameIndex["verb"]])
+	assert.Equal(t, "GET /apache_pb.gif HTTP/1.0", fastRet[current.nameIndex["rawrequest"]])
+}
+
+func TestRabbitMQRunnerSkipsOverriddenDependency(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["DATA"] = `%{INT}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	pattern := `%{DATA:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
+	current, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.rabbitRunner != nil {
+		t.Fatal("RabbitMQ runner should not run with overridden DATA")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `not-int [INFO] hello`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestSolrRunnerSkipsOverriddenReporterDefinition(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["solrReporter"] = `%{INT}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	pattern := `%{TIMESTAMP_ISO8601:time}%{SPACE}%{LOGLEVEL:status}%{SPACE}\(%{NOTSPACE:thread}\)%{SPACE}\[%{SPACE}%{NOTSPACE}?\]%{SPACE}%{solrReporter:reporter}.*`
+	current, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.solrRunner != nil {
+		t.Fatal("Solr runner should not run with incompatible solrReporter definition")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `2024-01-02T03:04:05Z INFO (thread-1) [   ] org.apache.solr.Core message`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
 func TestRawRegexCharClassLeadingBracketLiteralIsPreserved(t *testing.T) {
 	g, err := CompilePattern(`[]()]`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -456,6 +549,130 @@ func TestRawRegexCharClassLeadingBracketLiteralIsPreserved(t *testing.T) {
 	if _, err := g.Run(":", true); err != ErrMismatch {
 		t.Fatalf("expected mismatch for outside class, got %v", err)
 	}
+}
+
+func TestRawRegexPOSIXCharClassIsPreserved(t *testing.T) {
+	g, err := CompilePattern(`[[:digit:]()]`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, line := range []string{"5", ")"} {
+		if _, err := g.Run(line, true); err != nil {
+			t.Fatalf("expected POSIX class match for %q, got %v", line, err)
+		}
+	}
+	for _, line := range []string{":", "?"} {
+		if _, err := g.Run(line, true); err != ErrMismatch {
+			t.Fatalf("expected mismatch for outside POSIX class %q, got %v", line, err)
+		}
+	}
+}
+
+func TestRawRegexQuotedLiteralIsPreserved(t *testing.T) {
+	g, err := CompilePattern(`\Q(foo)\E`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.Run("(foo)", true); err != nil {
+		t.Fatalf("expected quoted literal match, got %v", err)
+	}
+	if _, err := g.Run("(?:foo)", true); err != ErrMismatch {
+		t.Fatalf("expected mismatch for rewritten group text, got %v", err)
+	}
+}
+
+func TestSpecializedRunnerSkipsOverriddenPrimitiveDefinition(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["WORD"] = `%{INT}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	pattern := `%{TIMESTAMP_ISO8601:time}\s+%{INT:thread_id}\s+%{WORD:operation}\s+%{GREEDYDATA:raw_query}`
+	current, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.mysqlRunner != nil {
+		t.Fatal("mysql runner should not run when WORD is overridden")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `2026-04-24T10:31:42.981+08:00 183742 SELECT SELECT * FROM orders`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestSpecializedRunnerSkipsOverriddenNestedDependency(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["APPDATE"] = `%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}`
+	patterns["UPBLOCK"] = `(upstream: "%{GREEDYDATA:upstream}", )?`
+	patterns["YEAR"] = `[A-Z]+`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	pattern := `%{APPDATE:time} \[%{LOGLEVEL:level}\] %{GREEDYDATA:msg}, client: %{IPORHOST:client}, server: %{NOTSPACE:server}, request: "%{WORD:method} %{GREEDYDATA:path} HTTP/%{NUMBER:http_version}", %{UPBLOCK}host: "%{NOTSPACE:host}"`
+	current, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.nginxErrorRunner != nil {
+		t.Fatal("nginx error runner should not run when APPDATE dependency is overridden")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `2026/04/22 10:11:12 [error] upstream timed out, client: 10.0.0.8, server: gateway.local, request: "GET /api/orders HTTP/1.1", host: "demo.local"`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestPostfixRunnerSkipsOverriddenDependency(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["QUEUEID"] = `[0-9A-F]{10,11}`
+	patterns["WORD"] = `%{INT}`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) != 0 {
+		t.Fatalf("denormalize custom patterns: %v", errs)
+	}
+
+	current, err := CompilePattern(postfixQueuePattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher != nil && current.fastMatcher.postfixRunner != nil {
+		t.Fatal("postfix runner should not run when WORD is overridden")
+	}
+
+	regexpOnly, err := CompilePattern(postfixQueuePattern, PatternStorage{denorm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	line := `Apr 22 10:11:12 mail-01 postfix[12345]: 3F4A2BC901: status=deferred`
+	fastRet, fastErr := current.Run(line, true)
+	regexpRet, regexpErr := regexpOnly.Run(line, true)
+	assert.Equal(t, regexpErr, fastErr)
+	assert.Equal(t, regexpRet, fastRet)
 }
 
 func TestStructuredCompositePattern(t *testing.T) {

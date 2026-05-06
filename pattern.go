@@ -198,6 +198,7 @@ func normalizeAnonymousCaptures(raw string) string {
 	builder.Grow(len(raw))
 	inClass := false
 	classStart := false
+	inQuote := false
 
 	for i := 0; i < len(raw); i++ {
 		switch raw[i] {
@@ -206,11 +207,21 @@ func normalizeAnonymousCaptures(raw string) string {
 			if i+1 < len(raw) {
 				i++
 				builder.WriteByte(raw[i])
+				switch raw[i] {
+				case 'Q':
+					inQuote = true
+				case 'E':
+					inQuote = false
+				}
 			}
 			if inClass {
 				classStart = false
 			}
 		case '[':
+			if inQuote {
+				builder.WriteByte(raw[i])
+				continue
+			}
 			if !inClass {
 				inClass = true
 				classStart = true
@@ -219,13 +230,21 @@ func normalizeAnonymousCaptures(raw string) string {
 			}
 			builder.WriteByte(raw[i])
 		case ']':
+			if inQuote {
+				builder.WriteByte(raw[i])
+				continue
+			}
+			if inClass && isPOSIXClassClose(raw, i) {
+				builder.WriteByte(raw[i])
+				continue
+			}
 			if inClass && !classStart {
 				inClass = false
 			}
 			classStart = false
 			builder.WriteByte(raw[i])
 		case '(':
-			if inClass || (i+1 < len(raw) && raw[i+1] == '?') {
+			if inQuote || inClass || (i+1 < len(raw) && raw[i+1] == '?') {
 				builder.WriteByte(raw[i])
 				if inClass {
 					classStart = false
@@ -242,6 +261,23 @@ func normalizeAnonymousCaptures(raw string) string {
 	}
 
 	return builder.String()
+}
+
+func isPOSIXClassClose(raw string, close int) bool {
+	if close < 2 || raw[close-1] != ':' {
+		return false
+	}
+	open := close - 2
+	for open >= 0 && raw[open] != '[' {
+		open--
+	}
+	if open < 0 || open+1 >= close {
+		return false
+	}
+	if raw[open+1] == '^' {
+		return open+2 < close
+	}
+	return raw[open+1] == ':'
 }
 
 func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error) error {

@@ -22,8 +22,8 @@ type elasticDefaultRunner struct {
 	nodeIDIdx int
 }
 
-func compileElasticDefaultRunner(pattern string, nameIndex map[string]int) (*elasticDefaultRunner, bool) {
-	if pattern != elasticDefaultPattern || nameIndex == nil {
+func compileElasticDefaultRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*elasticDefaultRunner, bool) {
+	if pattern != elasticDefaultPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "LOGLEVEL", "SPACE", "NOTSPACE", "HOSTNAME") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -98,8 +98,8 @@ type elasticSearchSlowRunner struct {
 	durationIdx int
 }
 
-func compileElasticSearchSlowRunner(pattern string, nameIndex map[string]int) (*elasticSearchSlowRunner, bool) {
-	if pattern != elasticSearchSlowPattern || nameIndex == nil {
+func compileElasticSearchSlowRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*elasticSearchSlowRunner, bool) {
+	if pattern != elasticSearchSlowPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "LOGLEVEL", "SPACE", "HOSTNAME", "NOTSPACE", "INT") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -248,8 +248,8 @@ type elasticRunner struct {
 	durationIdx int
 }
 
-func compileElasticRunner(pattern string, nameIndex map[string]int) (*elasticRunner, bool) {
-	if nameIndex == nil || !strings.HasPrefix(pattern, `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}`) {
+func compileElasticRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*elasticRunner, bool) {
+	if nameIndex == nil || !strings.HasPrefix(pattern, `^\[%{TIMESTAMP_ISO8601:time}\]\[%{LOGLEVEL:status}`) || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "LOGLEVEL", "SPACE", "HOSTNAME", "NOTSPACE", "INT") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -464,8 +464,8 @@ type nginxErrorRunner struct {
 	hostKind    structuredKind
 }
 
-func compileNginxErrorRunner(pattern string, nameIndex map[string]int) (*nginxErrorRunner, bool) {
-	if nameIndex == nil || !nginxErrorPatternHasDate(pattern) || !nginxErrorPatternHasLevel(pattern) {
+func compileNginxErrorRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*nginxErrorRunner, bool) {
+	if nameIndex == nil || !nginxErrorPatternHasDate(pattern) || !nginxErrorPatternHasLevel(pattern) || !nginxErrorPatternDefinitionsMatch(pattern, storage) {
 		return nil, false
 	}
 	r := &nginxErrorRunner{timeIdx: -1, statusIdx: -1, msgIdx: -1, clientIdx: -1, serverIdx: -1, methodIdx: -1, urlIdx: -1, versionIdx: -1, upstreamIdx: -1, hostIdx: -1}
@@ -522,6 +522,34 @@ func nginxErrorPatternHasLevel(pattern string) bool {
 func nginxErrorPatternHasDetailedShape(pattern string) bool {
 	return strings.Contains(pattern, `client: %{NOTSPACE:client_ip}`) ||
 		strings.Contains(pattern, `client: %{IPORHOST:client}`)
+}
+
+func nginxErrorPatternDefinitionsMatch(pattern string, storage PatternStorageIface) bool {
+	names := []string{"LOGLEVEL", "GREEDYDATA"}
+	switch {
+	case strings.Contains(pattern, `%{date2:time}`):
+		names = append(names, "date2")
+	case strings.Contains(pattern, `%{APPDATE:time}`):
+		names = append(names, "APPDATE")
+	default:
+		return false
+	}
+	if strings.Contains(pattern, `%{NOTSPACE:client_ip}`) || strings.Contains(pattern, `%{NOTSPACE:server}`) || strings.Contains(pattern, `%{NOTSPACE:host}`) {
+		names = append(names, "NOTSPACE")
+	}
+	if strings.Contains(pattern, `%{IPORHOST:client}`) {
+		names = append(names, "IPORHOST")
+	}
+	if strings.Contains(pattern, `%{WORD:`) {
+		names = append(names, "WORD")
+	}
+	if strings.Contains(pattern, `%{NUMBER:`) {
+		names = append(names, "NUMBER")
+	}
+	if strings.Contains(pattern, `%{UPBLOCK}`) {
+		names = append(names, "UPBLOCK")
+	}
+	return defaultPatternDefinitionsMatch(storage, names...)
 }
 
 func lookupFirstNameIndex(nameIndex map[string]int, names ...string) int {

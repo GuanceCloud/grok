@@ -9,8 +9,8 @@ type solrRunner struct {
 	reporterIdx int
 }
 
-func compileSolrRunner(pattern string, steps []structuredStep) (*solrRunner, bool) {
-	if pattern != solrTailPattern || len(steps) == 0 {
+func compileSolrRunner(pattern string, steps []structuredStep, storage PatternStorageIface) (*solrRunner, bool) {
+	if pattern != solrTailPattern || len(steps) == 0 || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "SPACE", "LOGLEVEL", "NOTSPACE", "solrReporter") {
 		return nil, false
 	}
 	var timeIdx, statusIdx, threadIdx, reporterIdx = -1, -1, -1, -1

@@ -3,13 +3,84 @@ package grok
 import "strings"
 
 const (
-	mysqlSimplePattern = `%{TIMESTAMP_ISO8601:time}\s+%{INT:thread_id}\s+%{WORD:operation}\s+%{GREEDYDATA:raw_query}`
-	sqlserverPattern   = `%{TIMESTAMP_ISO8601:time} %{NOTSPACE:origin}\s+%{GREEDYDATA:msg}`
+	mysqlSimplePattern  = `%{TIMESTAMP_ISO8601:time}\s+%{INT:thread_id}\s+%{WORD:operation}\s+%{GREEDYDATA:raw_query}`
+	sqlserverPattern    = `%{TIMESTAMP_ISO8601:time} %{NOTSPACE:origin}\s+%{GREEDYDATA:msg}`
 	kafkaBracketPattern = `^\[%{date1:time}\] %{WORD:status} %{DATA:msg} \(%{DATA:name}\)`
-	kingbasePattern    = `%{log_date:time}%{SPACE}\[%{INT:process_id}\]%{SPACE}%{status:status}:\s+%{GREEDYDATA:msg}`
-	redisPattern       = `%{INT:pid}:%{WORD:role} %{date2:time} %{NOTSPACE:serverity} %{GREEDYDATA:msg}`
-	damengPattern      = `%{log_date:time}%{SPACE}\[%{status:status}\]\s+%{GREEDYDATA:msg}`
+	kingbasePattern     = `%{log_date:time}%{SPACE}\[%{INT:process_id}\]%{SPACE}%{status:status}:\s+%{GREEDYDATA:msg}`
+	redisPattern        = `%{INT:pid}:%{WORD:role} %{date2:time} %{NOTSPACE:serverity} %{GREEDYDATA:msg}`
+	damengPattern       = `%{log_date:time}%{SPACE}\[%{status:status}\]\s+%{GREEDYDATA:msg}`
 )
+
+var specializedRunnerAllowedCustomDefinitions = map[string][]string{
+	"APPDATE":  {`%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}`},
+	"UPBLOCK":  {`(upstream: "%{GREEDYDATA:upstream}", )?`, `(?:upstream: "%{GREEDYDATA:upstream}", )?`},
+	"date2":    {`%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}`, `%{MONTHDAY} %{MONTH} %{YEAR}?%{TIME}`},
+	"log_date": {`%{YEAR}-%{MONTHNUM}-%{MONTHDAY}%{SPACE}%{HOUR}:%{MINUTE}:%{SECOND}%{SPACE}(?:CST|UTC)`},
+	"olf_time": {`%{MONTHDAY}-%{MONTH}-%{YEAR} %{TIME}`},
+	"QUEUEID":  {`[0-9A-F]{10,11}`},
+	"solrReporter": {
+		`[\w.]+`,
+		`[A-Za-z0-9_.]+`,
+		`(?:[.\w\d]+)`,
+	},
+	"status": {`(LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO)`},
+}
+
+func defaultPatternDefinitionsMatch(storage PatternStorageIface, names ...string) bool {
+	if storage == nil {
+		return false
+	}
+	visiting := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !defaultPatternDefinitionMatches(storage, name, visiting) {
+			return false
+		}
+	}
+	return true
+}
+
+func defaultPatternDefinitionMatches(storage PatternStorageIface, name string, visiting map[string]bool) bool {
+	if visiting[name] {
+		return false
+	}
+	pattern, ok := storage.GetPattern(name)
+	if !ok || pattern == nil {
+		return false
+	}
+	if !defaultOrAllowedCustomPatternDefinition(name, pattern.pattern) {
+		return false
+	}
+
+	visiting[name] = true
+	defer delete(visiting, name)
+
+	ok = true
+	if err := walkPatternRefs(pattern.pattern, func(_, _ int, ref patternRef) error {
+		if !defaultPatternDefinitionMatches(storage, ref.syntax, visiting) {
+			ok = false
+		}
+		return nil
+	}); err != nil {
+		return false
+	}
+	return ok
+}
+
+func defaultOrAllowedCustomPatternDefinition(name string, pattern string) bool {
+	if defaultPattern, ok := defalutPatterns[name]; ok && pattern == defaultPattern {
+		return true
+	}
+	return allowedCustomPatternDefinition(name, pattern)
+}
+
+func allowedCustomPatternDefinition(name string, pattern string) bool {
+	for _, allowed := range specializedRunnerAllowedCustomDefinitions[name] {
+		if pattern == allowed {
+			return true
+		}
+	}
+	return false
+}
 
 type mysqlSimpleRunner struct {
 	timeIdx      int
@@ -18,8 +89,8 @@ type mysqlSimpleRunner struct {
 	queryIdx     int
 }
 
-func compileMySQLSimpleRunner(pattern string, nameIndex map[string]int) (*mysqlSimpleRunner, bool) {
-	if pattern != mysqlSimplePattern || nameIndex == nil {
+func compileMySQLSimpleRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*mysqlSimpleRunner, bool) {
+	if pattern != mysqlSimplePattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "INT", "WORD", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -108,8 +179,8 @@ type sqlServerRunner struct {
 	msgIdx    int
 }
 
-func compileSQLServerRunner(pattern string, nameIndex map[string]int) (*sqlServerRunner, bool) {
-	if pattern != sqlserverPattern || nameIndex == nil {
+func compileSQLServerRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*sqlServerRunner, bool) {
+	if pattern != sqlserverPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "NOTSPACE", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -179,8 +250,8 @@ type kafkaBracketRunner struct {
 	nameIdx   int
 }
 
-func compileKafkaBracketRunner(pattern string, nameIndex map[string]int) (*kafkaBracketRunner, bool) {
-	if pattern != kafkaBracketPattern || nameIndex == nil {
+func compileKafkaBracketRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*kafkaBracketRunner, bool) {
+	if pattern != kafkaBracketPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "date1", "WORD", "DATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -269,8 +340,8 @@ type kingbaseRunner struct {
 	msgIdx    int
 }
 
-func compileKingbaseRunner(pattern string, nameIndex map[string]int) (*kingbaseRunner, bool) {
-	if pattern != kingbasePattern || nameIndex == nil {
+func compileKingbaseRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*kingbaseRunner, bool) {
+	if pattern != kingbasePattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "log_date", "SPACE", "INT", "status", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -354,15 +425,15 @@ func (r *kingbaseRunner) match(content string) (timeVal, pidVal, statusVal, msgV
 }
 
 type redisRunner struct {
-	pidIdx      int
-	roleIdx     int
-	timeIdx     int
+	pidIdx       int
+	roleIdx      int
+	timeIdx      int
 	serverityIdx int
-	msgIdx      int
+	msgIdx       int
 }
 
-func compileRedisRunner(pattern string, nameIndex map[string]int) (*redisRunner, bool) {
-	if pattern != redisPattern || nameIndex == nil {
+func compileRedisRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*redisRunner, bool) {
+	if pattern != redisPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "INT", "WORD", "date2", "NOTSPACE", "GREEDYDATA") {
 		return nil, false
 	}
 	pidIdx, ok := nameIndex["pid"]
@@ -458,8 +529,8 @@ type damengRunner struct {
 	msgIdx    int
 }
 
-func compileDamengRunner(pattern string, nameIndex map[string]int) (*damengRunner, bool) {
-	if pattern != damengPattern || nameIndex == nil {
+func compileDamengRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*damengRunner, bool) {
+	if pattern != damengPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "log_date", "status", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]

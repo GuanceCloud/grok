@@ -14,8 +14,8 @@ type jenkinsRunner struct {
 	statusIdx int
 }
 
-func compileJenkinsRunner(pattern string, nameIndex map[string]int) (*jenkinsRunner, bool) {
-	if (pattern != jenkinsPattern && pattern != jenkinsPatternTabs) || nameIndex == nil {
+func compileJenkinsRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*jenkinsRunner, bool) {
+	if (pattern != jenkinsPattern && pattern != jenkinsPatternTabs) || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "TIMESTAMP_ISO8601", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]
@@ -88,8 +88,8 @@ type tomcatCatalinaRunner struct {
 	msgIdx          int
 }
 
-func compileTomcatCatalinaRunner(pattern string, nameIndex map[string]int) (*tomcatCatalinaRunner, bool) {
-	if pattern != tomcatCatalinaPattern || nameIndex == nil {
+func compileTomcatCatalinaRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*tomcatCatalinaRunner, bool) {
+	if pattern != tomcatCatalinaPattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "olf_time", "LOGLEVEL", "NOTSPACE", "GREEDYDATA") {
 		return nil, false
 	}
 	timeIdx, ok := nameIndex["time"]

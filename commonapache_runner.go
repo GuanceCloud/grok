@@ -19,11 +19,7 @@ func compileCommonApacheRunner(pattern string, nameIndex map[string]int, storage
 	if pattern != "%{COMMONAPACHELOG}" || len(nameIndex) == 0 {
 		return nil, false
 	}
-	if storage == nil {
-		return nil, false
-	}
-	common, ok := storage.GetPattern("COMMONAPACHELOG")
-	if !ok || common.pattern != defalutPatterns["COMMONAPACHELOG"] {
+	if !defaultPatternDefinitionsMatch(storage, "COMMONAPACHELOG") {
 		return nil, false
 	}
 	runner := &commonApacheRunner{

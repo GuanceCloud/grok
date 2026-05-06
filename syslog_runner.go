@@ -14,7 +14,7 @@ type postfixQueueRunner struct {
 }
 
 func compilePostfixQueueRunner(pattern string, nameIndex map[string]int, storage PatternStorageIface) (*postfixQueueRunner, bool) {
-	if pattern != postfixQueuePattern || nameIndex == nil || !postfixQueueDefinitionMatches(storage) {
+	if pattern != postfixQueuePattern || nameIndex == nil || !defaultPatternDefinitionsMatch(storage, "SYSLOGTIMESTAMP", "SYSLOGHOST", "WORD", "POSINT", "QUEUEID", "GREEDYDATA") {
 		return nil, false
 	}
 	r := &postfixQueueRunner{
@@ -29,14 +29,6 @@ func compilePostfixQueueRunner(pattern string, nameIndex map[string]int, storage
 		return nil, false
 	}
 	return r, true
-}
-
-func postfixQueueDefinitionMatches(storage PatternStorageIface) bool {
-	if storage == nil {
-		return false
-	}
-	pattern, ok := storage.GetPattern("QUEUEID")
-	return ok && pattern != nil && pattern.pattern == `[0-9A-F]{10,11}`
 }
 
 func (r *postfixQueueRunner) run(dst []string, content string, trimSpace bool) bool {
