@@ -221,6 +221,33 @@ func TestCustomAliasNginxErrorUsesRunner(t *testing.T) {
 	t.Fatal("expected custom nginx error fixture")
 }
 
+func TestCustomAliasPostfixUsesRunner(t *testing.T) {
+	fixtures := loadCommonPatternFixtures(t)
+	for _, fixture := range fixtures {
+		if fixture.name != "custom_alias_postfix" {
+			continue
+		}
+		if fixture.current.fastMatcher == nil {
+			t.Fatalf("expected custom postfix pattern to use fast matcher")
+		}
+		if fixture.current.fastMatcher.postfixRunner == nil {
+			t.Fatalf("expected custom postfix pattern to use postfix runner, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
+		}
+		lines := []string{
+			fixture.line,
+			`prefix Apr  2 10:11:12 mail-01 postfix[12345]: 3F4A2BC901: queued`,
+			`Apr 22 10:11:12 mail-01 postfix[12345]: 3F4A2BC90: too short`,
+			`Apr 22 10:11:12 mail-01 postfix[12345]: 3f4A2BC901: lowercase`,
+			`Apr 22 10:11:12 mail-01 postfix[0]: 3F4A2BC901: zero pid`,
+		}
+		for _, line := range lines {
+			assertRunParity(t, fixture.current, fixture.regexpOnly, line, true)
+		}
+		return
+	}
+	t.Fatal("expected custom postfix fixture")
+}
+
 func BenchmarkCommonComposedPatterns(b *testing.B) {
 	fixtures := loadCommonPatternFixtures(b)
 	if len(fixtures) == 0 {

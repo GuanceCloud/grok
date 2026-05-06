@@ -28,6 +28,7 @@ type structuredMatcher struct {
 	elasticDefaultRunner *elasticDefaultRunner
 	elasticSearchRunner  *elasticSearchSlowRunner
 	nginxErrorRunner     *nginxErrorRunner
+	postfixRunner        *postfixQueueRunner
 	rabbitRunner         *rabbitMQRunner
 	solrRunner           *solrRunner
 	startOnlyRunner      bool
@@ -152,6 +153,9 @@ func buildFastMatcher(gP *GrokPattern, storage PatternStorageIface, meta *compil
 func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
 	steps, ok := compileStructuredSteps(pattern, storage, meta, 0)
 	if !ok || len(steps) == 0 {
+		if matcher := buildPatternOnlyFastMatcher(pattern, storage, meta); matcher != nil {
+			return matcher
+		}
 		return nil
 	}
 	steps = compactStructuredSteps(steps)
@@ -186,11 +190,27 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	matcher.elasticDefaultRunner, _ = compileElasticDefaultRunner(pattern, meta.nameIndex)
 	matcher.elasticSearchRunner, _ = compileElasticSearchSlowRunner(pattern, meta.nameIndex)
 	matcher.nginxErrorRunner, _ = compileNginxErrorRunner(pattern, meta.nameIndex)
+	matcher.postfixRunner, _ = compilePostfixQueueRunner(pattern, meta.nameIndex, storage)
 	matcher.rabbitRunner, _ = compileRabbitMQRunner(pattern, steps)
 	matcher.solrRunner, _ = compileSolrRunner(pattern, steps)
 	matcher.startOnlyRunner = matcher.hasConcreteStartOnlyRunner()
 	matcher.riskySearch = shouldLimitUnanchoredSearchMatcher(matcher)
 	if matcher.riskySearch && shouldDisableSmallRiskySearchMatcher(matcher) {
+		return nil
+	}
+	return &matcher
+}
+
+func buildPatternOnlyFastMatcher(pattern string, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
+	if meta == nil {
+		return nil
+	}
+	matcher := structuredMatcher{
+		anchoredStart: patternHasStartAnchor(pattern),
+	}
+	matcher.postfixRunner, _ = compilePostfixQueueRunner(pattern, meta.nameIndex, storage)
+	matcher.startOnlyRunner = matcher.hasConcreteStartOnlyRunner()
+	if !matcher.startOnlyRunner {
 		return nil
 	}
 	return &matcher
@@ -1766,6 +1786,7 @@ func (m structuredMatcher) hasConcreteStartOnlyRunner() bool {
 		m.elasticDefaultRunner != nil ||
 		m.elasticSearchRunner != nil ||
 		m.nginxErrorRunner != nil ||
+		m.postfixRunner != nil ||
 		m.rabbitRunner != nil ||
 		m.solrRunner != nil
 }
@@ -1799,6 +1820,13 @@ func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, tri
 	}
 	if m.tomcatRunner != nil {
 		if m.tomcatRunner.run(dst, content[pos:], trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+		return false
+	}
+	if m.postfixRunner != nil {
+		if m.postfixRunner.run(dst, content[pos:], trimSpace) {
 			return true
 		}
 		resetStringResults(dst)
@@ -1930,6 +1958,13 @@ func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, t
 	}
 	if m.tomcatRunner != nil {
 		if m.tomcatRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+		return false
+	}
+	if m.postfixRunner != nil {
+		if m.postfixRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
 			return true
 		}
 		resetAnyResults(dst)
