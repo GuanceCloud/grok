@@ -355,20 +355,12 @@ func isCanonicalAlphaCase(s string) bool {
 		return false
 	}
 
-	allLower := true
-	allUpper := true
 	title := true
 
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < 'A' || (c > 'Z' && c < 'a') || c > 'z' {
 			return false
-		}
-		if c < 'a' || c > 'z' {
-			allLower = false
-		}
-		if c < 'A' || c > 'Z' {
-			allUpper = false
 		}
 		if i == 0 {
 			if c < 'A' || c > 'Z' {
@@ -379,7 +371,7 @@ func isCanonicalAlphaCase(s string) bool {
 		}
 	}
 
-	return allLower || allUpper || title
+	return title
 }
 
 func consumeTimeOfDay(s string, start int) (int, bool) {

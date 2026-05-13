@@ -25,19 +25,19 @@ type patternScore struct {
 }
 
 type patternScoreMetrics struct {
-	LiteralCount                 int
-	LiteralBytes                 int
-	RefCount                     int
-	PrimitiveRefCount            int
-	WideRefCount                 int
-	GreedyRefCount               int
-	OptionalCount                int
-	AlternationCount             int
-	RepeatCount                  int
-	RawRegexCount                int
-	UnsupportedRegexCount        int
-	MaxDepth                     int
-	DeterministicDelimiterCount  int
+	LiteralCount                int
+	LiteralBytes                int
+	RefCount                    int
+	PrimitiveRefCount           int
+	WideRefCount                int
+	GreedyRefCount              int
+	OptionalCount               int
+	AlternationCount            int
+	RepeatCount                 int
+	RawRegexCount               int
+	UnsupportedRegexCount       int
+	MaxDepth                    int
+	DeterministicDelimiterCount int
 }
 
 type patternScoreSummary struct {

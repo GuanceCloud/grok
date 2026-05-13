@@ -24,11 +24,13 @@ prefix_loop:
 	B prefix_loop
 
 prefix_true:
-	MOVB $1, ret+32(FP)
+	MOVD $1, R0
+	MOVB R0, ret+32(FP)
 	RET
 
 prefix_false:
-	MOVB $0, ret+32(FP)
+	MOVD $0, R0
+	MOVB R0, ret+32(FP)
 	RET
 
 TEXT ·archStringEqualAsm(SB), NOSPLIT, $0-40
@@ -52,9 +54,11 @@ equal_loop:
 	B equal_loop
 
 equal_true:
-	MOVB $1, ret+32(FP)
+	MOVD $1, R0
+	MOVB R0, ret+32(FP)
 	RET
 
 equal_false:
-	MOVB $0, ret+32(FP)
+	MOVD $0, R0
+	MOVB R0, ret+32(FP)
 	RET
