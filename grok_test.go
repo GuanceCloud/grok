@@ -81,6 +81,70 @@ func TestStructuredIRMetadata(t *testing.T) {
 	}
 }
 
+func TestStructuredCharClassInverseEscapesParity(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["ANY"] = `[\\s\\S]*`
+	patterns["NONDIGITS"] = `[\\D]*`
+	patterns["NONWORDS"] = `[\\W]*`
+
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	storage := PatternStorage{denorm}
+
+	cases := []struct {
+		name      string
+		pattern   string
+		line      string
+		trimSpace bool
+	}{
+		{
+			name:      "dot all style class trims full capture",
+			pattern:   `%{ANY:item}`,
+			line:      " not_space ",
+			trimSpace: true,
+		},
+		{
+			name:      "dot all style class preserves full capture",
+			pattern:   `%{ANY:item}`,
+			line:      " not_space ",
+			trimSpace: false,
+		},
+		{
+			name:      "inverse digit class",
+			pattern:   `%{NONDIGITS:item}`,
+			line:      "abc- ",
+			trimSpace: false,
+		},
+		{
+			name:      "inverse word class",
+			pattern:   `%{NONWORDS:item}`,
+			line:      " -\t",
+			trimSpace: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected structured fast matcher")
+			}
+			regexpOnly, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			assertRunParity(t, current, regexpOnly, tc.line, tc.trimSpace)
+		})
+	}
+}
+
 func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
 	g, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {

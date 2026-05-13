@@ -1651,13 +1651,31 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 						class.Table[b] = true
 					}
 				}
+			case 'W':
+				for b := 0; b < 256; b++ {
+					if !isWordByte(byte(b)) {
+						class.Table[b] = true
+					}
+				}
 			case 'd':
 				for ch := byte('0'); ch <= '9'; ch++ {
 					class.Table[ch] = true
 				}
+			case 'D':
+				for b := 0; b < 256; b++ {
+					if b < '0' || b > '9' {
+						class.Table[b] = true
+					}
+				}
 			case 's':
 				for _, ch := range []byte{' ', '\t', '\r', '\n', '\f', '\v'} {
 					class.Table[ch] = true
+				}
+			case 'S':
+				for b := 0; b < 256; b++ {
+					if !isRegexpASCIISpace(byte(b)) {
+						class.Table[b] = true
+					}
 				}
 			default:
 				class.Table[spec[i]] = true
