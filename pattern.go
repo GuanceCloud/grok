@@ -33,8 +33,11 @@ type patternRef struct {
 
 type compiledRegexpMeta struct {
 	re            *regexp.Regexp
+	filter        *regexpFilter
 	subMatchNames SubMatchName
 	nameIndex     map[string]int
+	prefilter     *regexpPrefilter
+	multiFilter   multiPatternFilter
 }
 
 var compiledRegexpCache sync.Map
@@ -176,6 +179,107 @@ func parsePatternRef(spec string) (patternRef, bool, error) {
 	}
 }
 
+func normalizeAnonymousCaptures(raw string) string {
+	if len(raw) < 2 {
+		return raw
+	}
+
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' || i+1 >= len(raw) {
+			continue
+		}
+		if raw[i+1] >= '1' && raw[i+1] <= '9' {
+			return raw
+		}
+		i++
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(raw))
+	inClass := false
+	classStart := false
+	inQuote := false
+
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '\\':
+			builder.WriteByte(raw[i])
+			if i+1 < len(raw) {
+				i++
+				builder.WriteByte(raw[i])
+				switch raw[i] {
+				case 'Q':
+					inQuote = true
+				case 'E':
+					inQuote = false
+				}
+			}
+			if inClass {
+				classStart = false
+			}
+		case '[':
+			if inQuote {
+				builder.WriteByte(raw[i])
+				continue
+			}
+			if !inClass {
+				inClass = true
+				classStart = true
+			} else {
+				classStart = false
+			}
+			builder.WriteByte(raw[i])
+		case ']':
+			if inQuote {
+				builder.WriteByte(raw[i])
+				continue
+			}
+			if inClass && isPOSIXClassClose(raw, i) {
+				builder.WriteByte(raw[i])
+				continue
+			}
+			if inClass && !classStart {
+				inClass = false
+			}
+			classStart = false
+			builder.WriteByte(raw[i])
+		case '(':
+			if inQuote || inClass || (i+1 < len(raw) && raw[i+1] == '?') {
+				builder.WriteByte(raw[i])
+				if inClass {
+					classStart = false
+				}
+				continue
+			}
+			builder.WriteString("(?:")
+		default:
+			builder.WriteByte(raw[i])
+			if inClass && !(classStart && raw[i] == '^') {
+				classStart = false
+			}
+		}
+	}
+
+	return builder.String()
+}
+
+func isPOSIXClassClose(raw string, close int) bool {
+	if close < 2 || raw[close-1] != ':' {
+		return false
+	}
+	open := close - 2
+	for open >= 0 && raw[open] != '[' {
+		open--
+	}
+	if open < 0 || open+1 >= close {
+		return false
+	}
+	if raw[open+1] == '^' {
+		return open+2 < close
+	}
+	return raw[open+1] == ':'
+}
+
 func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error) error {
 	for i := 0; i < len(input); {
 		start := strings.Index(input[i:], "%{")
@@ -215,6 +319,7 @@ func walkPatternRefs(input string, fn func(start, end int, ref patternRef) error
 func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 	*GrokPattern, error,
 ) {
+	input = normalizeAnonymousCaptures(input)
 	gPattern := &GrokPattern{
 		varbType: make(map[string]string),
 		pattern:  input,
@@ -297,6 +402,7 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	if err != nil {
 		return nil, err
 	}
+	requiredPrefix, requiredSuffix, requiredLiterals, minMatchLength := compilePatternPrefilterIR(gP.pattern, storage)
 
 	valueKinds := make([]valueKind, len(meta.subMatchNames.name))
 	for i, name := range meta.subMatchNames.name {
@@ -313,12 +419,19 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 	}
 
 	return &GrokRegexp{
-		grokPattern:   gP,
-		re:            meta.re,
-		subMatchNames: meta.subMatchNames,
-		nameIndex:     meta.nameIndex,
-		valueKinds:    valueKinds,
-		fastMatcher:   buildFastMatcher(gP, storage, meta),
+		grokPattern:      gP,
+		re:               meta.re,
+		filter:           meta.filter,
+		subMatchNames:    meta.subMatchNames,
+		nameIndex:        meta.nameIndex,
+		valueKinds:       valueKinds,
+		fastMatcher:      buildFastMatcher(gP, storage, meta),
+		prefilter:        meta.prefilter,
+		multiFilter:      meta.multiFilter,
+		requiredPrefix:   requiredPrefix,
+		requiredSuffix:   requiredSuffix,
+		requiredLiterals: requiredLiterals,
+		minMatchLength:   minMatchLength,
 	}, nil
 }
 
@@ -328,6 +441,11 @@ func loadCompiledRegexpMeta(denormalized string) (*compiledRegexpMeta, error) {
 	}
 
 	re, err := regexp.Compile(denormalized)
+	if err != nil {
+		return nil, err
+	}
+
+	multiFilter, err := compileMultiPatternFilter([]string{denormalized})
 	if err != nil {
 		return nil, err
 	}
@@ -357,8 +475,11 @@ func loadCompiledRegexpMeta(denormalized string) (*compiledRegexpMeta, error) {
 
 	meta := &compiledRegexpMeta{
 		re:            re,
+		filter:        buildRegexpFilter(denormalized),
 		subMatchNames: subMatchNames,
 		nameIndex:     nameIndex,
+		prefilter:     buildRegexpPrefilter(denormalized, re),
+		multiFilter:   multiFilter,
 	}
 	actual, _ := compiledRegexpCache.LoadOrStore(denormalized, meta)
 	return actual.(*compiledRegexpMeta), nil
@@ -529,7 +650,7 @@ var defalutPatterns = map[string]string{
 	"MONTHNUM2":            `(?:0[1-9]|1[0-2])`,
 	"MONTHDAY":             `(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])`,
 	"DAY":                  `(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)`,
-	"YEAR":                 `(\d\d){1,2}`,
+	"YEAR":                 `(?:\d\d){1,2}`,
 	"HOUR":                 `(?:2[0123]|[01]?[0-9])`,
 	"MINUTE":               `(?:[0-5][0-9])`,
 	"SECOND":               `(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)`,
@@ -558,7 +679,7 @@ var defalutPatterns = map[string]string{
 	"COMMONAPACHELOG":      `%{IPORHOST:clientip} %{HTTPDUSER:ident} %{USER:auth} \[%{HTTPDATE:timestamp}\] "(?:%{WORD:verb} %{NOTSPACE:request}(?: HTTP/%{NUMBER:httpversion})?|%{DATA:rawrequest})" %{NUMBER:response} (?:%{NUMBER:bytes}|-)`,
 	"COMBINEDAPACHELOG":    `%{COMMONAPACHELOG} %{QS:referrer} %{QS:agent}`,
 	"HTTPD20_ERRORLOG":     `\[%{HTTPDERROR_DATE:timestamp}\] \[%{LOGLEVEL:loglevel}\] (?:\[client %{IPORHOST:clientip}\] ){0,1}%{GREEDYDATA:errormsg}`,
-	"HTTPD24_ERRORLOG":     `\[%{HTTPDERROR_DATE:timestamp}\] \[%{WORD:module}:%{LOGLEVEL:loglevel}\] \[pid %{POSINT:pid}:tid %{NUMBER:tid}\]( \(%{POSINT:proxy_errorcode}\)%{DATA:proxy_errormessage}:)?( \[client %{IPORHOST:client}:%{POSINT:clientport}\])? %{DATA:errorcode}: %{GREEDYDATA:message}`,
+	"HTTPD24_ERRORLOG":     `\[%{HTTPDERROR_DATE:timestamp}\] \[%{WORD:module}:%{LOGLEVEL:loglevel}\] \[pid %{POSINT:pid}:tid %{NUMBER:tid}\](?: \(%{POSINT:proxy_errorcode}\)%{DATA:proxy_errormessage}:)?(?: \[client %{IPORHOST:client}:%{POSINT:clientport}\])? %{DATA:errorcode}: %{GREEDYDATA:message}`,
 	"HTTPD_ERRORLOG":       `%{HTTPD20_ERRORLOG}|%{HTTPD24_ERRORLOG}`,
 	"LOGLEVEL":             `(?:[Aa]lert|ALERT|[Tt]race|TRACE|[Dd]ebug|DEBUG|[Nn]otice|NOTICE|[Ii]nfo|INFO|[Ww]arn?(?:ing)?|WARN?(?:ING)?|[Ee]rr?(?:or)?|ERR?(?:OR)?|[Cc]rit?(?:ical)?|CRIT?(?:ICAL)?|[Ff]atal|FATAL|[Ss]evere|SEVERE|EMERG(?:ENCY)?|[Ee]merg(?:ency)?)`,
 	"COMMONENVOYACCESSLOG": `\[%{TIMESTAMP_ISO8601:timestamp}\] \"%{DATA:method} (?:%{URIPATH:uri_path}(?:%{URIPARAM:uri_param})?|%{DATA:}) %{DATA:protocol}\" %{NUMBER:status_code} %{DATA:response_flags} %{NUMBER:bytes_received} %{NUMBER:bytes_sent} %{NUMBER:duration} (?:%{NUMBER:upstream_service_time}|%{DATA:tcp_service_time}) \"%{DATA:forwarded_for}\" \"%{DATA:user_agent}\" \"%{DATA:request_id}\" \"%{DATA:authority}\" \"%{DATA:upstream_service}\"`,

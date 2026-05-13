@@ -21,12 +21,19 @@ type SubMatchName struct {
 }
 
 type GrokRegexp struct {
-	grokPattern   *GrokPattern
-	re            *regexp.Regexp
-	subMatchNames SubMatchName
-	nameIndex     map[string]int
-	valueKinds    []valueKind
-	fastMatcher   *structuredMatcher
+	grokPattern      *GrokPattern
+	re               *regexp.Regexp
+	filter           *regexpFilter
+	subMatchNames    SubMatchName
+	nameIndex        map[string]int
+	valueKinds       []valueKind
+	fastMatcher      *structuredMatcher
+	prefilter        *regexpPrefilter
+	multiFilter      multiPatternFilter
+	requiredPrefix   string
+	requiredSuffix   string
+	requiredLiterals []string
+	minMatchLength   int
 }
 
 type valueKind uint8
@@ -142,6 +149,13 @@ func (g *GrokRegexp) RunWithTypeInfo(content string, trimSpace bool) ([]any, err
 }
 
 func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any) ([]any, error) {
+	if g.fastMatcher != nil {
+		castDst := ensureAnyBuffer(dst, len(g.subMatchNames.name))
+		if g.fastMatcher.matchTyped(castDst, content, trimSpace, g.valueKinds) {
+			return castDst, nil
+		}
+	}
+
 	match, err := g.matchIndexes(content)
 	if err != nil {
 		return nil, err
@@ -160,6 +174,15 @@ func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any
 func (g *GrokRegexp) matchIndexes(content string) ([]int, error) {
 	if g.re == nil {
 		return nil, ErrNotCompiled
+	}
+	if g.multiFilter != nil && !g.multiFilter.MatchString(content) {
+		return nil, ErrMismatch
+	}
+	if g.prefilter != nil && g.prefilter.rejects(content) {
+		return nil, ErrMismatch
+	}
+	if g.filter != nil && !g.filter.re.MatchString(content) {
+		return nil, ErrMismatch
 	}
 
 	match := g.re.FindStringSubmatchIndex(content)

@@ -1,18 +1,72 @@
 package grok
 
-import "strings"
+import (
+	internalmatch "github.com/GuanceCloud/grok/internal/match"
+	"net"
+	"strings"
+	"sync"
+	"unicode/utf8"
+)
 
 type structuredMatcher struct {
-	steps        []structuredStep
-	writes       bool
-	backtracking bool
-	changeLog    bool
-	changeCap    int
+	steps                []structuredStep
+	ir                   structuredIRInfo
+	required             []string
+	anchoredStart        bool
+	anchoredRunner       *anchoredDissectRunner
+	accessRunner         *accessLogRunner
+	commonRunner         *commonApacheRunner
+	jenkinsRunner        *jenkinsRunner
+	tomcatRunner         *tomcatCatalinaRunner
+	mysqlRunner          *mysqlSimpleRunner
+	sqlserverRunner      *sqlServerRunner
+	kafkaRunner          *kafkaBracketRunner
+	kingbaseRunner       *kingbaseRunner
+	redisRunner          *redisRunner
+	damengRunner         *damengRunner
+	elasticRunner        *elasticRunner
+	elasticDefaultRunner *elasticDefaultRunner
+	elasticSearchRunner  *elasticSearchSlowRunner
+	nginxErrorRunner     *nginxErrorRunner
+	postfixRunner        *postfixQueueRunner
+	rabbitRunner         *rabbitMQRunner
+	solrRunner           *solrRunner
+	startOnlyRunner      bool
+	writes               bool
+	backtracking         bool
+	changeLog            bool
+	changeCap            int
+	riskySearch          bool
 }
 
 type matchChange struct {
 	idx  int
 	prev string
+}
+
+type typedMatchChange struct {
+	idx  int
+	prev any
+}
+
+type matchChangeBuffer struct {
+	changes []matchChange
+}
+
+type typedMatchChangeBuffer struct {
+	changes []typedMatchChange
+}
+
+var matchChangePool = sync.Pool{
+	New: func() any {
+		return &matchChangeBuffer{changes: make([]matchChange, 0, 16)}
+	},
+}
+
+var typedMatchChangePool = sync.Pool{
+	New: func() any {
+		return &typedMatchChangeBuffer{changes: make([]typedMatchChange, 0, 16)}
+	},
 }
 
 type structuredStep struct {
@@ -26,49 +80,67 @@ type structuredStep struct {
 	optPrefix             string
 	optPrefixSkips        bool
 	deterministicOptional bool
+	parserBacktracking    bool
+	tailMinWidth          int
+	ir                    structuredIRInfo
+	nextIR                structuredIRInfo
 	writes                bool
 }
+
+type structuredIRInfo = internalmatch.StructuredIRInfo
 
 type structuredParser struct {
 	alias         string
 	dstIndex      int
 	kind          structuredKind
+	inner         *structuredParser
 	charClass     *asciiCharClass
 	allowEmpty    bool
+	dotAll        bool
+	singleChar    bool
 	nextLiteral   string
 	nextParser    structuredKind
 	hasNextParser bool
+	wrapPrefix    string
+	wrapSuffix    string
 }
 
-type asciiCharClass struct {
-	table [256]bool
-}
+type asciiCharClass = internalmatch.ASCIICharClass
 
-type structuredKind uint8
+type structuredKind = internalmatch.StructuredKind
+
+const structuredMaxExpandedRepeat = 16
 
 const (
-	structuredWord structuredKind = iota
-	structuredNotSpace
-	structuredHostName
-	structuredNumber
-	structuredCharClass
-	structuredMonthName
-	structuredDayName
-	structuredTimeOfDay
-	structuredYear
-	structuredMonthNum
-	structuredMonthDay
-	structuredHour
-	structuredMinute
-	structuredSecond
-	structuredQuoted
-	structuredUntilLiteral
-	structuredGreedyUntilLiteral
-	structuredSpacePlus
-	structuredSpaceStar
-	structuredTimestampISO8601
-	structuredHTTPDate
-	structuredLogLevel
+	structuredWord               = internalmatch.StructuredWord
+	structuredNotSpace           = internalmatch.StructuredNotSpace
+	structuredHostName           = internalmatch.StructuredHostName
+	structuredIPOrHost           = internalmatch.StructuredIPOrHost
+	structuredNumber             = internalmatch.StructuredNumber
+	structuredInt                = internalmatch.StructuredInt
+	structuredPosInt             = internalmatch.StructuredPosInt
+	structuredNonNegInt          = internalmatch.StructuredNonNegInt
+	structuredCharClass          = internalmatch.StructuredCharClass
+	structuredMonthName          = internalmatch.StructuredMonthName
+	structuredDayName            = internalmatch.StructuredDayName
+	structuredTimeOfDay          = internalmatch.StructuredTimeOfDay
+	structuredYear               = internalmatch.StructuredYear
+	structuredMonthNum           = internalmatch.StructuredMonthNum
+	structuredMonthDay           = internalmatch.StructuredMonthDay
+	structuredHour               = internalmatch.StructuredHour
+	structuredMinute             = internalmatch.StructuredMinute
+	structuredSecond             = internalmatch.StructuredSecond
+	structuredQuoted             = internalmatch.StructuredQuoted
+	structuredUntilLiteral       = internalmatch.StructuredUntilLiteral
+	structuredGreedyUntilLiteral = internalmatch.StructuredGreedyUntilLiteral
+	structuredSpaceOne           = internalmatch.StructuredSpaceOne
+	structuredSpacePlus          = internalmatch.StructuredSpacePlus
+	structuredSpaceStar          = internalmatch.StructuredSpaceStar
+	structuredTimestampISO8601   = internalmatch.StructuredTimestampISO8601
+	structuredURIPath            = internalmatch.StructuredURIPath
+	structuredURIPathParam       = internalmatch.StructuredURIPathParam
+	structuredHTTPDate           = internalmatch.StructuredHTTPDate
+	structuredLogLevel           = internalmatch.StructuredLogLevel
 )
 
 func buildFastMatcher(gP *GrokPattern, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
@@ -81,8 +153,12 @@ func buildFastMatcher(gP *GrokPattern, storage PatternStorageIface, meta *compil
 func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
 	steps, ok := compileStructuredSteps(pattern, storage, meta, 0)
 	if !ok || len(steps) == 0 {
+		if matcher := buildPatternOnlyFastMatcher(pattern, storage, meta); matcher != nil {
+			return matcher
+		}
 		return nil
 	}
+	steps = compactStructuredSteps(steps)
 
 	configureStructuredSteps(steps)
 	if !hasStructuredMatcherWork(steps) || !shouldUseStructuredMatcher(steps) {
@@ -90,24 +166,138 @@ func buildStructuredFastMatcher(pattern string, storage PatternStorageIface, met
 	}
 
 	matcher := structuredMatcher{
-		steps:        steps,
-		writes:       matcherWrites(steps),
-		backtracking: matcherNeedsBacktracking(steps),
-		changeLog:    matcherNeedsChangeLog(steps),
-		changeCap:    matcherChangeCapacity(steps),
+		steps:         steps,
+		ir:            buildStructuredMatcherIR(steps),
+		required:      buildStructuredRequiredLiterals(steps, 4),
+		anchoredStart: patternHasStartAnchor(pattern),
+		writes:        matcherWrites(steps),
+		backtracking:  matcherNeedsBacktracking(steps),
+		changeLog:     matcherNeedsChangeLog(steps),
+		changeCap:     matcherChangeCapacity(steps),
+	}
+	matcher.anchoredRunner, _ = compileAnchoredDissectRunner(steps, true)
+	matcher.accessRunner, _ = compileAccessRunner(steps)
+	matcher.commonRunner, _ = compileCommonApacheRunner(pattern, meta.nameIndex, storage)
+	matcher.jenkinsRunner, _ = compileJenkinsRunner(pattern, meta.nameIndex, storage)
+	matcher.tomcatRunner, _ = compileTomcatCatalinaRunner(pattern, meta.nameIndex, storage)
+	matcher.mysqlRunner, _ = compileMySQLSimpleRunner(pattern, meta.nameIndex, storage)
+	matcher.sqlserverRunner, _ = compileSQLServerRunner(pattern, meta.nameIndex, storage)
+	matcher.kafkaRunner, _ = compileKafkaBracketRunner(pattern, meta.nameIndex, storage)
+	matcher.kingbaseRunner, _ = compileKingbaseRunner(pattern, meta.nameIndex, storage)
+	matcher.redisRunner, _ = compileRedisRunner(pattern, meta.nameIndex, storage)
+	matcher.damengRunner, _ = compileDamengRunner(pattern, meta.nameIndex, storage)
+	matcher.elasticRunner, _ = compileElasticRunner(pattern, meta.nameIndex, storage)
+	matcher.elasticDefaultRunner, _ = compileElasticDefaultRunner(pattern, meta.nameIndex, storage)
+	matcher.elasticSearchRunner, _ = compileElasticSearchSlowRunner(pattern, meta.nameIndex, storage)
+	matcher.nginxErrorRunner, _ = compileNginxErrorRunner(pattern, meta.nameIndex, storage)
+	matcher.postfixRunner, _ = compilePostfixQueueRunner(pattern, meta.nameIndex, storage)
+	matcher.rabbitRunner, _ = compileRabbitMQRunner(pattern, steps, storage)
+	matcher.solrRunner, _ = compileSolrRunner(pattern, steps, storage)
+	matcher.startOnlyRunner = matcher.hasConcreteStartOnlyRunner()
+	matcher.riskySearch = shouldLimitUnanchoredSearchMatcher(matcher)
+	if matcher.riskySearch && shouldDisableSmallRiskySearchMatcher(matcher) {
+		return nil
 	}
 	return &matcher
 }
 
+func buildPatternOnlyFastMatcher(pattern string, storage PatternStorageIface, meta *compiledRegexpMeta) *structuredMatcher {
+	if meta == nil {
+		return nil
+	}
+	matcher := structuredMatcher{
+		anchoredStart: patternHasStartAnchor(pattern),
+	}
+	matcher.postfixRunner, _ = compilePostfixQueueRunner(pattern, meta.nameIndex, storage)
+	matcher.startOnlyRunner = matcher.hasConcreteStartOnlyRunner()
+	if !matcher.startOnlyRunner {
+		return nil
+	}
+	return &matcher
+}
+
+func getMatchChangeBuffer(capHint int) *matchChangeBuffer {
+	buf := matchChangePool.Get().(*matchChangeBuffer)
+	if capHint < 16 {
+		capHint = 16
+	}
+	if cap(buf.changes) < capHint {
+		buf.changes = make([]matchChange, 0, capHint)
+	} else {
+		buf.changes = buf.changes[:0]
+	}
+	return buf
+}
+
+func putMatchChangeBuffer(buf *matchChangeBuffer, changes []matchChange) {
+	if cap(changes) > 256 {
+		buf.changes = make([]matchChange, 0, 16)
+	} else {
+		buf.changes = changes[:0]
+	}
+	matchChangePool.Put(buf)
+}
+
+func getTypedMatchChangeBuffer(capHint int) *typedMatchChangeBuffer {
+	buf := typedMatchChangePool.Get().(*typedMatchChangeBuffer)
+	if capHint < 16 {
+		capHint = 16
+	}
+	if cap(buf.changes) < capHint {
+		buf.changes = make([]typedMatchChange, 0, capHint)
+	} else {
+		buf.changes = buf.changes[:0]
+	}
+	return buf
+}
+
+func putTypedMatchChangeBuffer(buf *typedMatchChangeBuffer, changes []typedMatchChange) {
+	if cap(changes) > 256 {
+		buf.changes = make([]typedMatchChange, 0, 16)
+	} else {
+		buf.changes = changes[:0]
+	}
+	typedMatchChangePool.Put(buf)
+}
+
+func compactStructuredSteps(steps []structuredStep) []structuredStep {
+	if len(steps) == 0 {
+		return steps
+	}
+
+	for i := range steps {
+		if steps[i].submatcher != nil {
+			steps[i].submatcher.steps = compactStructuredSteps(steps[i].submatcher.steps)
+		}
+		for _, alt := range steps[i].alternatives {
+			alt.steps = compactStructuredSteps(alt.steps)
+		}
+	}
+
+	out := make([]structuredStep, 0, len(steps))
+	for i := 0; i < len(steps); i++ {
+		if i+2 < len(steps) {
+			if wrapped, ok := buildWrappedParserStep(steps[i], steps[i+1], steps[i+2], false); ok {
+				out = append(out, wrapped)
+				i += 2
+				continue
+			}
+		}
+		out = append(out, steps[i])
+	}
+	return out
+}
+
+func patternHasStartAnchor(pattern string) bool {
+	return strings.HasPrefix(pattern, "^")
+}
+
 func configureStructuredSteps(steps []structuredStep) {
 	for i := range steps {
-		if steps[i].parser != nil {
-			steps[i].parser.nextLiteral = nextStructuredLiteral(steps, i+1)
-			steps[i].parser.nextParser, steps[i].parser.hasNextParser = nextStructuredParserKind(steps, i+1)
-			steps[i].writes = steps[i].parser.dstIndex >= 0
-		}
 		if steps[i].submatcher != nil {
 			configureStructuredSteps(steps[i].submatcher.steps)
+			steps[i].submatcher.ir = buildStructuredMatcherIR(steps[i].submatcher.steps)
+			steps[i].submatcher.required = buildStructuredRequiredLiterals(steps[i].submatcher.steps, 4)
 			steps[i].submatcher.writes = matcherWrites(steps[i].submatcher.steps)
 			steps[i].submatcher.backtracking = matcherNeedsBacktracking(steps[i].submatcher.steps)
 			steps[i].submatcher.changeLog = matcherNeedsChangeLog(steps[i].submatcher.steps)
@@ -116,11 +306,40 @@ func configureStructuredSteps(steps []structuredStep) {
 		}
 		for _, alt := range steps[i].alternatives {
 			configureStructuredSteps(alt.steps)
+			alt.ir = buildStructuredMatcherIR(alt.steps)
+			alt.required = buildStructuredRequiredLiterals(alt.steps, 4)
 			alt.writes = matcherWrites(alt.steps)
 			alt.backtracking = matcherNeedsBacktracking(alt.steps)
 			alt.changeLog = matcherNeedsChangeLog(alt.steps)
 			alt.changeCap = matcherChangeCapacity(alt.steps)
 			steps[i].writes = steps[i].writes || alt.writes
+		}
+		if steps[i].captureIndex >= 0 {
+			steps[i].writes = true
+		}
+		if steps[i].parser != nil {
+			steps[i].writes = steps[i].writes || steps[i].parser.dstIndex >= 0
+		}
+	}
+
+	tailMinWidth := 0
+	nextIR := internalmatch.EmptyIRInfo()
+	for i := len(steps) - 1; i >= 0; i-- {
+		steps[i].ir = buildStructuredStepIR(steps[i])
+		steps[i].nextIR = nextIR
+		requiredMinWidth := steps[i].ir.MinWidth
+		if steps[i].optional {
+			requiredMinWidth = 0
+		}
+		steps[i].tailMinWidth = tailMinWidth + requiredMinWidth
+		tailMinWidth = steps[i].tailMinWidth
+		nextIR = internalmatch.CombineIR(steps[i].ir, nextIR)
+	}
+
+	for i := range steps {
+		if steps[i].parser != nil {
+			steps[i].parser.nextLiteral = nextStructuredSlicingLiteral(steps, i+1)
+			steps[i].parser.nextParser, steps[i].parser.hasNextParser = nextStructuredParserKind(steps, i+1)
 		}
 		if len(steps[i].alternatives) > 0 {
 			steps[i].altPrefixes = buildAlternativePrefixes(steps[i].alternatives)
@@ -129,15 +348,229 @@ func configureStructuredSteps(steps []structuredStep) {
 			if steps[i].parser != nil && steps[i].parser.nextLiteral != "" && !steps[i].parser.allowEmpty {
 				steps[i].optPrefix = steps[i].parser.nextLiteral
 				steps[i].optPrefixSkips = true
-			} else if prefix, ok := firstStructuredLiteral(steps[i]); ok {
-				steps[i].optPrefix = prefix
+			} else if steps[i].ir.FirstLiteralExact {
+				steps[i].optPrefix = steps[i].ir.FirstLiteral
 				steps[i].optPrefixSkips = false
 			}
 			steps[i].deterministicOptional = isDeterministicOptionalStep(steps, i)
 		}
-		if steps[i].captureIndex >= 0 {
-			steps[i].writes = true
+	}
+
+	for i := range steps {
+		steps[i].parserBacktracking = parserStepNeedsBacktracking(steps, i)
+	}
+}
+
+func buildStructuredMatcherIR(steps []structuredStep) structuredIRInfo {
+	info := internalmatch.EmptyIRInfo()
+	if len(steps) == 0 {
+		return info
+	}
+
+	for i := range steps {
+		stepInfo := steps[i].ir
+		info.MinWidth += stepInfo.MinWidth
+		if !stepInfo.Nullable {
+			info.Nullable = false
 		}
+	}
+
+	info.FirstLiteral, info.FirstLiteralExact = matcherBoundaryLiteral(steps, true)
+	info.LastLiteral, info.LastLiteralExact = matcherBoundaryLiteral(steps, false)
+	return info
+}
+
+func buildStructuredStepIR(step structuredStep) structuredIRInfo {
+	info := structuredIRInfo{}
+
+	switch {
+	case step.literal != "":
+		info.MinWidth = len(step.literal)
+		info.FirstLiteral = step.literal
+		info.LastLiteral = step.literal
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
+	case step.parser != nil:
+		info.MinWidth = parserMinWidth(step.parser)
+		info.Nullable = step.parser.allowEmpty
+		if step.parser.wrapPrefix != "" {
+			info.FirstLiteral = step.parser.wrapPrefix
+			info.FirstLiteralExact = true
+		}
+		if step.parser.wrapSuffix != "" {
+			info.LastLiteral = step.parser.wrapSuffix
+			info.LastLiteralExact = true
+		}
+	case step.submatcher != nil:
+		info = step.submatcher.ir
+	case len(step.alternatives) > 0:
+		info = buildAlternativeIR(step.alternatives)
+	default:
+		info.Nullable = true
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
+	}
+
+	if step.optional {
+		info.Nullable = true
+		info.MinWidth = 0
+	}
+
+	return info
+}
+
+func buildAlternativeIR(alts []*structuredMatcher) structuredIRInfo {
+	info := structuredIRInfo{Nullable: false}
+	if len(alts) == 0 {
+		info.Nullable = true
+		info.FirstLiteralExact = true
+		info.LastLiteralExact = true
+		return info
+	}
+
+	minWidth := -1
+	firstLiteral := ""
+	firstExact := true
+	lastLiteral := ""
+	lastExact := true
+	nullable := false
+
+	for i, alt := range alts {
+		altInfo := alt.ir
+		if i == 0 || altInfo.MinWidth < minWidth {
+			minWidth = altInfo.MinWidth
+		}
+		nullable = nullable || altInfo.Nullable
+
+		if i == 0 {
+			firstLiteral = altInfo.FirstLiteral
+			firstExact = altInfo.FirstLiteralExact
+			lastLiteral = altInfo.LastLiteral
+			lastExact = altInfo.LastLiteralExact
+			continue
+		}
+		if firstLiteral != altInfo.FirstLiteral || !altInfo.FirstLiteralExact {
+			firstLiteral = ""
+			firstExact = false
+		}
+		if lastLiteral != altInfo.LastLiteral || !altInfo.LastLiteralExact {
+			lastLiteral = ""
+			lastExact = false
+		}
+	}
+
+	info.MinWidth = minWidth
+	info.Nullable = nullable
+	info.FirstLiteral = firstLiteral
+	info.FirstLiteralExact = firstExact && firstLiteral != ""
+	info.LastLiteral = lastLiteral
+	info.LastLiteralExact = lastExact && lastLiteral != ""
+	return info
+}
+
+func matcherBoundaryLiteral(steps []structuredStep, forward bool) (string, bool) {
+	parts := make([]structuredIRInfo, 0, len(steps))
+	for i := range steps {
+		parts = append(parts, steps[i].ir)
+	}
+	return internalmatch.IRBoundaryLiteral(parts, forward)
+}
+
+func parserMinWidth(p *structuredParser) int {
+	if p == nil {
+		return 0
+	}
+	if p.inner != nil {
+		return len(p.wrapPrefix) + len(p.wrapSuffix) + parserMinWidth(p.inner)
+	}
+	switch p.kind {
+	case structuredWord, structuredNotSpace, structuredHostName, structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt, structuredCharClass:
+		if p.allowEmpty {
+			return 0
+		}
+		return 1
+	case structuredMonthName:
+		return 2
+	case structuredDayName:
+		return 3
+	case structuredTimeOfDay:
+		return 4
+	case structuredYear:
+		return 2
+	case structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond:
+		return 1
+	case structuredQuoted:
+		return 2
+	case structuredUntilLiteral, structuredGreedyUntilLiteral, structuredSpaceStar:
+		return 0
+	case structuredSpaceOne, structuredSpacePlus:
+		return 1
+	case structuredTimestampISO8601:
+		return 13
+	case structuredHTTPDate:
+		return 20
+	case structuredLogLevel:
+		return 2
+	default:
+		return 0
+	}
+}
+
+func buildStructuredRequiredLiterals(steps []structuredStep, maxAtoms int) []string {
+	chunks, ok := structuredRequiredLiteralChunks(steps, 32)
+	if !ok || len(chunks) == 0 {
+		return nil
+	}
+	return selectRequiredLiteralAtoms(chunks, maxAtoms)
+}
+
+func structuredRequiredLiteralChunks(steps []structuredStep, limit int) ([]string, bool) {
+	if limit <= 0 {
+		return nil, false
+	}
+
+	out := make([]string, 0, len(steps))
+	for _, step := range steps {
+		parts, ok := structuredRequiredLiteralChunksFromStep(step, limit-len(out))
+		if !ok {
+			return nil, false
+		}
+		out = append(out, parts...)
+		if len(out) > limit {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+func structuredRequiredLiteralChunksFromStep(step structuredStep, limit int) ([]string, bool) {
+	if step.optional || limit <= 0 {
+		return nil, true
+	}
+
+	switch {
+	case step.literal != "":
+		return []string{step.literal}, true
+	case step.submatcher != nil:
+		return structuredRequiredLiteralChunks(step.submatcher.steps, limit)
+	case len(step.alternatives) > 0:
+		chunks, ok := structuredRequiredLiteralChunks(step.alternatives[0].steps, limit)
+		if !ok {
+			return nil, false
+		}
+		for i := 1; i < len(step.alternatives); i++ {
+			other, ok := structuredRequiredLiteralChunks(step.alternatives[i].steps, limit)
+			if !ok {
+				return nil, false
+			}
+			chunks = commonLiteralSequence(chunks, other)
+			if len(chunks) == 0 {
+				return nil, true
+			}
+		}
+		return chunks, true
+	default:
+		return nil, true
 	}
 }
 
@@ -148,11 +581,10 @@ func buildAlternativePrefixes(alts []*structuredMatcher) []string {
 
 	prefixes := make([]string, len(alts))
 	for i, alt := range alts {
-		prefix := nextStructuredLiteral(alt.steps, 0)
-		if prefix == "" {
+		if !alt.ir.FirstLiteralExact || alt.ir.FirstLiteral == "" {
 			return nil
 		}
-		prefixes[i] = prefix
+		prefixes[i] = alt.ir.FirstLiteral
 	}
 
 	for i := range prefixes {
@@ -174,6 +606,22 @@ func isDeterministicOptionalStep(steps []structuredStep, idx int) bool {
 		return false
 	}
 	if step.parser != nil {
+		if step.parser.wrapPrefix != "" {
+			curPrefix, ok := firstStructuredLiteral(step)
+			if !ok || curPrefix == "" {
+				return false
+			}
+			nextPrefix := ""
+			if steps[idx].nextIR.FirstLiteralExact {
+				nextPrefix = steps[idx].nextIR.FirstLiteral
+			}
+			if nextPrefix == "" {
+				return false
+			}
+			return curPrefix != nextPrefix &&
+				!strings.HasPrefix(curPrefix, nextPrefix) &&
+				!strings.HasPrefix(nextPrefix, curPrefix)
+		}
 		return (step.parser.nextLiteral != "" && !step.parser.allowEmpty) ||
 			canSkipOptionalParser(step.parser)
 	}
@@ -185,7 +633,10 @@ func isDeterministicOptionalStep(steps []structuredStep, idx int) bool {
 	if !ok || curPrefix == "" {
 		return false
 	}
-	nextPrefix := nextStructuredLiteral(steps, idx+1)
+	nextPrefix := ""
+	if steps[idx].nextIR.FirstLiteralExact {
+		nextPrefix = steps[idx].nextIR.FirstLiteral
+	}
 	if nextPrefix == "" {
 		return false
 	}
@@ -215,7 +666,10 @@ func matcherWrites(steps []structuredStep) bool {
 
 func matcherNeedsBacktracking(steps []structuredStep) bool {
 	for i := range steps {
-		if steps[i].optional && !isDeterministicOptionalStep(steps, i) {
+		if steps[i].parserBacktracking {
+			return true
+		}
+		if steps[i].optional && !isDeterministicOptionalStep(steps, i) && !optionalStepCanCommitLinearly(steps, i) {
 			return true
 		}
 		if steps[i].submatcher != nil && matcherNeedsBacktracking(steps[i].submatcher.steps) {
@@ -233,7 +687,10 @@ func matcherNeedsBacktracking(steps []structuredStep) bool {
 func matcherNeedsChangeLog(steps []structuredStep) bool {
 	for i := range steps {
 		step := steps[i]
-		if step.optional && !isDeterministicOptionalStep(steps, i) {
+		if step.parserBacktracking && step.parser.dstIndex >= 0 {
+			return true
+		}
+		if step.optional && !isDeterministicOptionalStep(steps, i) && !optionalStepCanCommitLinearly(steps, i) {
 			return true
 		}
 		if step.submatcher != nil && matcherNeedsChangeLog(step.submatcher.steps) {
@@ -251,6 +708,70 @@ func matcherNeedsChangeLog(steps []structuredStep) bool {
 		}
 	}
 	return false
+}
+
+func parserNeedsBacktracking(step structuredStep) bool {
+	return step.parser != nil && step.parser.nextLiteral != "" &&
+		(step.parser.kind == structuredGreedyUntilLiteral ||
+			(step.parser.kind == structuredNotSpace && !step.parser.hasNextParser && !literalStartsWithRegexpSpace(step.parser.nextLiteral)))
+}
+
+func parserStepNeedsBacktracking(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx >= len(steps) || !parserNeedsBacktracking(steps[idx]) {
+		return false
+	}
+	step := steps[idx]
+	if step.optional && step.deterministicOptional && step.parser != nil && step.parser.wrapSuffix != "" {
+		return false
+	}
+	return !backtrackingParserCanCommitLinearly(steps, idx)
+}
+
+func backtrackingParserCanCommitLinearly(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx+1 >= len(steps) {
+		return false
+	}
+	step := steps[idx]
+	if step.optional || step.parser == nil || step.parser.nextLiteral == "" {
+		return false
+	}
+	if idx+2 != len(steps) {
+		return false
+	}
+	next := steps[idx+1]
+	return !next.optional &&
+		next.literal == step.parser.nextLiteral &&
+		next.captureIndex < 0 &&
+		next.parser == nil &&
+		next.submatcher == nil &&
+		len(next.alternatives) == 0
+}
+
+func optionalStepCanCommitLinearly(steps []structuredStep, idx int) bool {
+	step := steps[idx]
+	if !step.optional || step.parser == nil {
+		return false
+	}
+	if step.captureIndex >= 0 || step.submatcher != nil || len(step.alternatives) > 0 {
+		return false
+	}
+	if idx+1 >= len(steps) {
+		return true
+	}
+	for i := idx + 1; i < len(steps); i++ {
+		next := steps[i]
+		if next.optional || next.captureIndex >= 0 || next.submatcher != nil || len(next.alternatives) > 0 || next.literal != "" || next.parser == nil {
+			return false
+		}
+		if next.parser.dstIndex >= 0 || next.parser.kind != structuredGreedyUntilLiteral || next.parser.nextLiteral != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func literalStartsWithRegexpSpace(lit string) bool {
+	return lit != "" && isRegexpASCIISpace(lit[0])
 }
 
 func matcherChangeCapacity(steps []structuredStep) int {
@@ -318,24 +839,43 @@ func shouldUseStructuredMatcher(steps []structuredStep) bool {
 	}
 
 	stats := collectStructuredStats(steps)
-	if stats.newlineLiteralCount > 0 && (stats.optionalCount > 0 || stats.alternativeCount > 0 || stats.parserCount > 12) {
-		return false
-	}
-	// Some medium-complexity patterns still compile structurally but do not
-	// beat regexp in practice. The Datakit Apache error fixture is the
-	// representative case: two GREEDYDATA captures around a single expanded
-	// submatcher and no branches. Let those fall back, while keeping simpler
-	// two-greedy layouts such as Jenkins on the fast path.
-	if stats.greedyParserCount >= 2 && stats.optionalCount == 0 && stats.alternativeCount == 0 && stats.submatcherCount == 1 && stats.parserCount >= 8 {
-		return false
-	}
-	// Highly optional, nested patterns still require regexp-style backtracking
-	// to preserve capture alignment. PostgreSQL's default fixture is the
-	// representative case here.
-	if stats.optionalCount >= 2 && stats.submatcherCount >= 5 && stats.parserCount >= 10 {
+	if stats.newlineLiteralCount > 0 && stats.alternativeCount > 0 && stats.parserCount > 12 {
 		return false
 	}
 	return true
+}
+
+func shouldLimitUnanchoredSearchMatcher(matcher structuredMatcher) bool {
+	if matcher.anchoredStart || matcher.hasStartOnlyRunner() {
+		return false
+	}
+	if matcher.ir.FirstLiteralExact && matcher.ir.FirstLiteral != "" {
+		return false
+	}
+	return matcher.backtracking && matcher.changeLog && hasWritableOptionalStep(matcher.steps)
+}
+
+func hasWritableOptionalStep(steps []structuredStep) bool {
+	for i := range steps {
+		step := steps[i]
+		if step.optional && step.writes {
+			return true
+		}
+		if step.submatcher != nil && hasWritableOptionalStep(step.submatcher.steps) {
+			return true
+		}
+		for _, alt := range step.alternatives {
+			if hasWritableOptionalStep(alt.steps) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shouldDisableSmallRiskySearchMatcher(matcher structuredMatcher) bool {
+	stats := collectStructuredStats(matcher.steps)
+	return stats.parserCount <= 5 && stats.submatcherCount <= 1 && stats.alternativeCount == 0
 }
 
 type structuredStats struct {
@@ -399,6 +939,9 @@ func compileStructuredSteps(pattern string, storage PatternStorageIface, meta *c
 	if depth > 16 {
 		return nil, false
 	}
+	if step, ok := compileDotAllTailPattern(pattern); ok {
+		return []structuredStep{step}, true
+	}
 
 	alts, pos, ok := parseStructuredExpression(pattern, 0, 0, storage, meta, depth)
 	if !ok || pos != len(pattern) {
@@ -411,6 +954,33 @@ func compileStructuredSteps(pattern string, storage PatternStorageIface, meta *c
 
 	steps := []structuredStep{{alternatives: buildAlternativeMatchers(alts), captureIndex: -1}}
 	return steps, validateStructuredSteps(steps)
+}
+
+func compileDotAllTailPattern(pattern string) (structuredStep, bool) {
+	switch pattern {
+	case `(?s)(.*)`, `(?s)(?:.*)`:
+		return structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredGreedyUntilLiteral,
+				allowEmpty: true,
+				dotAll:     true,
+			},
+		}, true
+	case `(?s)(.+)`, `(?s)(?:.+)`:
+		return structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredGreedyUntilLiteral,
+				allowEmpty: false,
+				dotAll:     true,
+			},
+		}, true
+	default:
+		return structuredStep{}, false
+	}
 }
 
 func parseStructuredExpression(pattern string, pos int, stop byte, storage PatternStorageIface, meta *compiledRegexpMeta, depth int) ([][]structuredStep, int, bool) {
@@ -462,11 +1032,9 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 	if err != nil || !ok {
 		return nil, pos, false
 	}
-	next := end + 1
-	optional := false
-	if next < len(pattern) && pattern[next] == '?' {
-		optional = true
-		next++
+	min, max, next, ok := parseStructuredRepeat(pattern, end+1)
+	if !ok {
+		return nil, pos, false
 	}
 
 	if kind, primitive := structuredPrimitiveKind(ref.syntax); primitive && canUseStructuredPrimitive(ref.syntax, storage) {
@@ -474,9 +1042,12 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 		if ref.alias != "" && dstIndex < 0 {
 			return nil, pos, false
 		}
+		if !(min == 1 && max == 1) && !(min == 0 && max == 1) {
+			return nil, pos, false
+		}
 		return []structuredStep{{
 			captureIndex: -1,
-			optional:     optional,
+			optional:     min == 0 && max == 1,
 			parser: &structuredParser{
 				alias:      ref.alias,
 				dstIndex:   dstIndex,
@@ -495,7 +1066,7 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 		return nil, pos, false
 	}
 
-	if ref.alias == "" && ref.varType == "" && !optional {
+	if ref.alias == "" && ref.varType == "" && min == 1 && max == 1 {
 		return childSteps, next, true
 	}
 
@@ -503,11 +1074,47 @@ func parseStructuredRef(pattern string, pos int, storage PatternStorageIface, me
 	if ref.alias != "" && dstIndex < 0 {
 		return nil, pos, false
 	}
-	return []structuredStep{{
+	optional := min == 0 && max == 1
+	if !optional && min == 1 && max == 1 {
+		if inlined, ok := inlineAliasedStructuredSteps(childSteps, dstIndex); ok {
+			return inlined, next, true
+		}
+	}
+	repeated := expandStructuredRepeat(structuredStep{
 		submatcher:   &structuredMatcher{steps: childSteps},
 		captureIndex: dstIndex,
-		optional:     optional,
-	}}, next, true
+	}, min, max, false)
+	if repeated == nil {
+		return nil, pos, false
+	}
+	return repeated, next, true
+}
+
+func inlineAliasedStructuredSteps(steps []structuredStep, dstIndex int) ([]structuredStep, bool) {
+	if dstIndex < 0 || len(steps) != 1 {
+		return nil, false
+	}
+
+	step := steps[0]
+	if step.optional || step.submatcher != nil || step.writes {
+		return nil, false
+	}
+
+	switch {
+	case step.parser != nil:
+		parser := *step.parser
+		parser.dstIndex = dstIndex
+		step.parser = &parser
+		return []structuredStep{step}, true
+	case len(step.alternatives) > 0:
+		step.captureIndex = dstIndex
+		return []structuredStep{step}, true
+	case step.literal != "":
+		step.captureIndex = dstIndex
+		return []structuredStep{step}, true
+	default:
+		return nil, false
+	}
 }
 
 func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, meta *compiledRegexpMeta, depth int) ([]structuredStep, int, bool) {
@@ -522,18 +1129,22 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	}
 	next++
 
-	optional := false
-	if next < len(pattern) && pattern[next] == '?' {
-		optional = true
-		next++
+	min, max, next, ok := parseStructuredRepeat(pattern, next)
+	if !ok {
+		return nil, pos, false
 	}
+	optional := min == 0 && max == 1
 
-	if len(alts) == 1 && !optional {
+	if len(alts) == 1 && min == 1 && max == 1 {
 		return alts[0], next, true
+	}
+	if len(alts) == 1 && optional {
+		if flattened, ok := flattenOptionalStructuredGroup(alts[0]); ok {
+			return flattened, next, true
+		}
 	}
 
 	step := structuredStep{
-		optional:     optional,
 		captureIndex: -1,
 	}
 	if len(alts) == 1 {
@@ -541,7 +1152,83 @@ func parseStructuredGroup(pattern string, pos int, storage PatternStorageIface, 
 	} else {
 		step.alternatives = buildAlternativeMatchers(alts)
 	}
-	return []structuredStep{step}, next, true
+	repeated := expandStructuredRepeat(step, min, max, true)
+	if repeated == nil && max != 0 {
+		return nil, pos, false
+	}
+	return repeated, next, true
+}
+
+func flattenOptionalStructuredGroup(steps []structuredStep) ([]structuredStep, bool) {
+	if len(steps) != 1 {
+		if wrapped, ok := flattenWrappedStructuredGroup(steps); ok {
+			return []structuredStep{wrapped}, true
+		}
+		return nil, false
+	}
+	step := steps[0]
+	if step.optional {
+		return nil, false
+	}
+	step.optional = true
+	return []structuredStep{step}, true
+}
+
+func flattenWrappedStructuredGroup(steps []structuredStep) (structuredStep, bool) {
+	if len(steps) != 3 {
+		return structuredStep{}, false
+	}
+	return buildWrappedParserStep(steps[0], steps[1], steps[2], true)
+}
+
+func buildWrappedParserStep(prefix, middle, suffix structuredStep, optional bool) (structuredStep, bool) {
+	if prefix.literal == "" || suffix.literal == "" {
+		return structuredStep{}, false
+	}
+	if prefix.optional || suffix.optional || prefix.captureIndex >= 0 || suffix.captureIndex >= 0 {
+		return structuredStep{}, false
+	}
+	if middle.optional || middle.captureIndex >= 0 || middle.submatcher != nil || len(middle.alternatives) > 0 || middle.parser == nil {
+		return structuredStep{}, false
+	}
+	if !canWrapStructuredParser(middle.parser) {
+		return structuredStep{}, false
+	}
+
+	innerCopy := *middle.parser
+	innerCopy.inner = nil
+	innerCopy.wrapPrefix = ""
+	innerCopy.wrapSuffix = ""
+	innerCopy.nextLiteral = suffix.literal
+	innerCopy.nextParser = 0
+	innerCopy.hasNextParser = false
+	parserCopy := innerCopy
+	parserCopy.inner = &innerCopy
+	parserCopy.wrapPrefix = prefix.literal
+	parserCopy.wrapSuffix = suffix.literal
+
+	return structuredStep{
+		parser:       &parserCopy,
+		captureIndex: -1,
+		optional:     optional,
+	}, true
+}
+
+func canWrapStructuredParser(p *structuredParser) bool {
+	if p == nil || p.dstIndex < 0 || p.allowEmpty {
+		return false
+	}
+	switch p.kind {
+	case structuredWord, structuredNotSpace, structuredHostName, structuredIPOrHost,
+		structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt,
+		structuredMonthName, structuredDayName, structuredTimeOfDay,
+		structuredYear, structuredMonthNum, structuredMonthDay, structuredHour,
+		structuredMinute, structuredSecond, structuredTimestampISO8601,
+		structuredHTTPDate, structuredLogLevel, structuredURIPath, structuredURIPathParam:
+		return true
+	default:
+		return false
+	}
 }
 
 func parseStructuredLiteral(pattern string, pos int) ([]structuredStep, int, bool) {
@@ -594,7 +1281,9 @@ func validateStructuredSteps(steps []structuredStep) bool {
 	for i := range steps {
 		step := steps[i]
 		if step.parser != nil && i+1 < len(steps) && steps[i+1].parser != nil && !canParserEndWithoutLiteral(step.parser.kind) {
-			return false
+			if !canParserBridgeToFutureLiteral(steps, i) {
+				return false
+			}
 		}
 		if step.submatcher != nil && !validateStructuredSteps(step.submatcher.steps) {
 			return false
@@ -608,18 +1297,65 @@ func validateStructuredSteps(steps []structuredStep) bool {
 	return true
 }
 
+func canParserBridgeToFutureLiteral(steps []structuredStep, idx int) bool {
+	if idx < 0 || idx >= len(steps) {
+		return false
+	}
+	if steps[idx].parser == nil {
+		return false
+	}
+	switch steps[idx].parser.kind {
+	case structuredUntilLiteral, structuredGreedyUntilLiteral:
+	default:
+		return false
+	}
+
+	for i := idx + 1; i < len(steps); i++ {
+		step := steps[i]
+		if step.optional || step.submatcher != nil || len(step.alternatives) > 0 {
+			return false
+		}
+		if step.literal != "" {
+			return true
+		}
+		if step.parser == nil {
+			return false
+		}
+		switch step.parser.kind {
+		case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
+			continue
+		default:
+			return false
+		}
+	}
+
+	return false
+}
+
 func structuredPrimitiveKind(syntax string) (structuredKind, bool) {
 	switch syntax {
 	case "WORD":
 		return structuredWord, true
 	case "HOSTNAME", "HOST":
 		return structuredHostName, true
-	case "NOTSPACE", "USER", "USERNAME", "IPORHOST", "IP", "URIHOST", "PATH", "URIPATH", "URIPATHPARAM":
+	case "IPORHOST", "IP":
+		return structuredIPOrHost, true
+	case "NOTSPACE", "USER", "USERNAME", "PATH":
 		return structuredNotSpace, true
+	case "URIPATH":
+		return structuredURIPath, true
+	case "URIPATHPARAM":
+		return structuredURIPathParam, true
 	case "EMAILLOCALPART":
 		return structuredNotSpace, true
-	case "INT", "NUMBER", "BASE10NUM", "POSINT", "NONNEGINT":
+	case "INT":
+		return structuredInt, true
+	case "NUMBER", "BASE10NUM":
 		return structuredNumber, true
+	case "POSINT":
+		return structuredPosInt, true
+	case "NONNEGINT":
+		return structuredNonNegInt, true
 	case "MONTH":
 		return structuredMonthName, true
 	case "DAY":
@@ -690,6 +1426,20 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 		flushLiteral()
 		steps = append(steps, structuredStep{literal: lit, optional: true, captureIndex: -1})
 	}
+	appendRepeatedLiteral := func(ch byte, allowEmpty bool) {
+		flushLiteral()
+		class := &asciiCharClass{}
+		class.Table[ch] = true
+		steps = append(steps, structuredStep{
+			captureIndex: -1,
+			parser: &structuredParser{
+				dstIndex:   -1,
+				kind:       structuredCharClass,
+				charClass:  class,
+				allowEmpty: allowEmpty,
+			},
+		})
+	}
 	for i := 0; i < len(raw); i++ {
 		switch raw[i] {
 		case '\\':
@@ -716,6 +1466,13 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 			switch raw[i] {
 			case 's':
 				flushLiteral()
+				if i+1 < len(raw) && raw[i+1] == '?' {
+					return nil, false
+				}
+				if i+1 >= len(raw) || (raw[i+1] != '+' && raw[i+1] != '*') {
+					steps = append(steps, structuredStep{captureIndex: -1, parser: &structuredParser{dstIndex: -1, kind: structuredSpaceOne}})
+					continue
+				}
 				if i+1 < len(raw) && raw[i+1] == '+' {
 					steps = append(steps, structuredStep{captureIndex: -1, parser: &structuredParser{dstIndex: -1, kind: structuredSpacePlus}})
 					i++
@@ -758,17 +1515,22 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 			if end >= len(raw) {
 				return nil, false
 			}
-			step, consumed, ok := compileSimpleCharClass(raw, i, end)
+			classSteps, consumed, ok := compileSimpleCharClass(raw, i, end)
 			if !ok {
 				return nil, false
 			}
 			flushLiteral()
-			steps = append(steps, step)
+			steps = append(steps, classSteps...)
 			i = consumed
 			continue
 		case ']', '{', '}', '+', '*', '?':
 			return nil, false
 		default:
+			if i+1 < len(raw) && (raw[i+1] == '+' || raw[i+1] == '*') {
+				appendRepeatedLiteral(raw[i], raw[i+1] == '*')
+				i++
+				continue
+			}
 			if i+1 < len(raw) && raw[i+1] == '?' {
 				appendOptionalLiteral(string(raw[i]))
 				i++
@@ -782,18 +1544,19 @@ func compileLiteralSteps(raw string) ([]structuredStep, bool) {
 	return steps, true
 }
 
-func compileSimpleCharClass(raw string, start, end int) (structuredStep, int, bool) {
+func compileSimpleCharClass(raw string, start, end int) ([]structuredStep, int, bool) {
 	spec := raw[start+1 : end]
 	if spec == "" {
-		return structuredStep{}, 0, false
+		return nil, 0, false
+	}
+
+	class, ok := buildASCIICharClass(spec)
+	if !ok {
+		return nil, 0, false
 	}
 
 	if end+1 < len(raw) && (raw[end+1] == '*' || raw[end+1] == '+') {
-		class, ok := buildASCIICharClass(spec)
-		if !ok {
-			return structuredStep{}, 0, false
-		}
-		return structuredStep{
+		return []structuredStep{{
 			captureIndex: -1,
 			parser: &structuredParser{
 				dstIndex:   -1,
@@ -801,33 +1564,75 @@ func compileSimpleCharClass(raw string, start, end int) (structuredStep, int, bo
 				charClass:  class,
 				allowEmpty: raw[end+1] == '*',
 			},
-		}, end + 1, true
+		}}, end + 1, true
 	}
 
-	options := make([]*structuredMatcher, 0, len(spec))
-	for i := 0; i < len(spec); i++ {
-		c := spec[i]
-		if c == '\\' {
-			if i+1 >= len(spec) {
-				return structuredStep{}, 0, false
-			}
-			i++
-			c = spec[i]
+	base := structuredStep{
+		captureIndex: -1,
+		parser: &structuredParser{
+			dstIndex:   -1,
+			kind:       structuredCharClass,
+			charClass:  class,
+			singleChar: true,
+		},
+	}
+
+	return []structuredStep{base}, end, true
+}
+
+func parseStructuredRepeat(pattern string, pos int) (int, int, int, bool) {
+	if pos >= len(pattern) {
+		return 1, 1, pos, true
+	}
+
+	switch pattern[pos] {
+	case '?':
+		next := pos + 1
+		if next < len(pattern) && pattern[next] == '?' {
+			return 0, 0, 0, false
 		}
-		switch c {
-		case '^', '-', '[', ']':
-			return structuredStep{}, 0, false
+		return 0, 1, next, true
+	case '{':
+		min, max, next, err := parseRepeatBounds(pattern, pos)
+		if err != nil {
+			return 0, 0, 0, false
 		}
-		options = append(options, &structuredMatcher{
-			steps: []structuredStep{{literal: string(c), captureIndex: -1}},
-		})
+		if next < len(pattern) && pattern[next] == '?' {
+			return 0, 0, 0, false
+		}
+		return min, max, next, true
+	case '*', '+':
+		return 0, 0, 0, false
+	default:
+		return 1, 1, pos, true
+	}
+}
+
+func expandStructuredRepeat(base structuredStep, min, max int, allowInlineZero bool) []structuredStep {
+	if min < 0 || max < min || max < 0 || max > structuredMaxExpandedRepeat {
+		return nil
+	}
+	if max == 0 {
+		if allowInlineZero {
+			return []structuredStep{}
+		}
+		return nil
+	}
+	if min == 1 && max == 1 {
+		return []structuredStep{base}
+	}
+	if min == 0 && max == 1 {
+		base.optional = true
+		return []structuredStep{base}
 	}
 
-	if len(options) == 0 {
-		return structuredStep{}, 0, false
+	out := make([]structuredStep, 0, max)
+	for i := 0; i < max; i++ {
+		step := base
+		step.optional = i >= min
+		out = append(out, step)
 	}
-
-	return structuredStep{alternatives: options, captureIndex: -1}, end, true
+	return out
 }
 
 func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
@@ -843,19 +1648,19 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 			case 'w':
 				for b := 0; b < 256; b++ {
 					if isWordByte(byte(b)) {
-						class.table[b] = true
+						class.Table[b] = true
 					}
 				}
 			case 'd':
 				for ch := byte('0'); ch <= '9'; ch++ {
-					class.table[ch] = true
+					class.Table[ch] = true
 				}
 			case 's':
 				for _, ch := range []byte{' ', '\t', '\r', '\n', '\f', '\v'} {
-					class.table[ch] = true
+					class.Table[ch] = true
 				}
 			default:
-				class.table[spec[i]] = true
+				class.Table[spec[i]] = true
 			}
 			continue
 		}
@@ -865,21 +1670,37 @@ func buildASCIICharClass(spec string) (*asciiCharClass, bool) {
 				return nil, false
 			}
 			for ch := c; ch <= end; ch++ {
-				class.table[ch] = true
+				class.Table[ch] = true
 			}
 			i += 2
 			continue
 		}
-		class.table[c] = true
+		class.Table[c] = true
 	}
 	return class, true
 }
 
-func nextStructuredLiteral(steps []structuredStep, start int) string {
+func nextStructuredSlicingLiteral(steps []structuredStep, start int) string {
 	for i := start; i < len(steps); i++ {
-		if lit, ok := firstStructuredLiteral(steps[i]); ok {
-			return lit
+		step := steps[i]
+		if step.optional {
+			return ""
 		}
+		if step.literal != "" {
+			return step.literal
+		}
+		if step.parser != nil {
+			if step.parser.wrapPrefix != "" {
+				return step.parser.wrapPrefix
+			}
+			switch step.parser.kind {
+			case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
+				continue
+			default:
+				return ""
+			}
+		}
+		return ""
 	}
 	return ""
 }
@@ -902,55 +1723,445 @@ func firstStructuredLiteral(step structuredStep) (string, bool) {
 	case step.literal != "":
 		return step.literal, true
 	case step.submatcher != nil:
-		return nextStructuredLiteral(step.submatcher.steps, 0), nextStructuredLiteral(step.submatcher.steps, 0) != ""
+		return step.submatcher.ir.FirstLiteral, step.submatcher.ir.FirstLiteralExact && step.submatcher.ir.FirstLiteral != ""
 	case len(step.alternatives) > 0:
-		var common string
-		for idx, alt := range step.alternatives {
-			lit := nextStructuredLiteral(alt.steps, 0)
-			if lit == "" {
-				return "", false
-			}
-			if idx == 0 {
-				common = lit
-				continue
-			}
-			if lit != common {
-				return "", false
-			}
-		}
-		return common, common != ""
+		return step.ir.FirstLiteral, step.ir.FirstLiteralExact && step.ir.FirstLiteral != ""
+	case step.parser != nil && step.parser.wrapPrefix != "":
+		return step.parser.wrapPrefix, true
 	default:
 		return "", false
 	}
 }
 
 func (m structuredMatcher) match(dst []string, content string, trimSpace bool) bool {
+	if m.anchoredStart || m.prefersStartOnly() {
+		return m.matchTopAt(dst, content, 0, trimSpace)
+	}
+	if m.riskySearch {
+		resetStringResults(dst)
+		return m.matchTopAt(dst, content, 0, trimSpace)
+	}
+	if m.hasStartOnlyRunner() {
+		resetStringResults(dst)
+		if m.matchTopAt(dst, content, 0, trimSpace) {
+			return true
+		}
+	}
+	return m.matchSearch(dst, content, trimSpace)
+}
+
+func (m structuredMatcher) matchTyped(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
+	if m.anchoredStart || m.prefersStartOnly() {
+		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
+	}
+	if m.riskySearch {
+		resetAnyResults(dst)
+		return m.matchTypedTopAt(dst, content, 0, trimSpace, kinds)
+	}
+	if m.hasStartOnlyRunner() {
+		resetAnyResults(dst)
+		if m.matchTypedTopAt(dst, content, 0, trimSpace, kinds) {
+			return true
+		}
+	}
+	return m.matchTypedSearch(dst, content, trimSpace, kinds)
+}
+
+func (m structuredMatcher) hasStartOnlyRunner() bool {
+	return m.startOnlyRunner
+}
+
+func (m structuredMatcher) hasConcreteStartOnlyRunner() bool {
+	return m.accessRunner != nil ||
+		m.commonRunner != nil ||
+		m.jenkinsRunner != nil ||
+		m.tomcatRunner != nil ||
+		m.mysqlRunner != nil ||
+		m.sqlserverRunner != nil ||
+		m.kafkaRunner != nil ||
+		m.kingbaseRunner != nil ||
+		m.redisRunner != nil ||
+		m.damengRunner != nil ||
+		m.elasticRunner != nil ||
+		m.elasticDefaultRunner != nil ||
+		m.elasticSearchRunner != nil ||
+		m.nginxErrorRunner != nil ||
+		m.postfixRunner != nil ||
+		m.rabbitRunner != nil ||
+		m.solrRunner != nil
+}
+
+func (m structuredMatcher) prefersStartOnly() bool {
+	if len(m.steps) == 0 {
+		return true
+	}
+	step := m.steps[0]
+	if step.optional {
+		return false
+	}
+	if step.parser == nil {
+		return false
+	}
+	switch step.parser.kind {
+	case structuredUntilLiteral, structuredGreedyUntilLiteral, structuredSpaceStar:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m structuredMatcher) matchTopAt(dst []string, content string, pos int, trimSpace bool) bool {
+	if m.accessRunner != nil {
+		if m.accessRunner.run(dst, content[pos:], trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+		return false
+	}
+	if m.tomcatRunner != nil {
+		if m.tomcatRunner.run(dst, content[pos:], trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+		return false
+	}
+	if m.postfixRunner != nil {
+		if m.postfixRunner.run(dst, content[pos:], trimSpace) {
+			return true
+		}
+		resetStringResults(dst)
+		return false
+	}
+	if pos == 0 && m.startOnlyRunner {
+		if pos == 0 && m.commonRunner != nil {
+			if m.commonRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.jenkinsRunner != nil {
+			if m.jenkinsRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.mysqlRunner != nil {
+			if m.mysqlRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.sqlserverRunner != nil {
+			if m.sqlserverRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.kafkaRunner != nil {
+			if m.kafkaRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.kingbaseRunner != nil {
+			if m.kingbaseRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.redisRunner != nil {
+			if m.redisRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.damengRunner != nil {
+			if m.damengRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.elasticRunner != nil {
+			if m.elasticRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.elasticDefaultRunner != nil {
+			if m.elasticDefaultRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.elasticSearchRunner != nil {
+			if m.elasticSearchRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.nginxErrorRunner != nil {
+			if m.nginxErrorRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.rabbitRunner != nil {
+			if m.rabbitRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+		if pos == 0 && m.solrRunner != nil {
+			if m.solrRunner.run(dst, content, trimSpace) {
+				return true
+			}
+			resetStringResults(dst)
+		}
+	}
+	if m.quickReject(content, pos) {
+		return false
+	}
+	if m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.runAt(dst, content, pos, trimSpace)
+		return ok && next >= 0
+	}
 	if !m.backtracking && !m.changeLog {
-		next, ok := m.matchLinearFrom(dst, content, 0, trimSpace)
+		next, ok := m.matchLinearFrom(dst, content, pos, trimSpace)
 		return ok && next >= 0
 	}
 
-	var smallChanges [8]matchChange
-	changes := smallChanges[:0]
 	changeCap := len(dst)
 	if m.changeCap > changeCap {
 		changeCap = m.changeCap
 	}
-	if changeCap > len(smallChanges) {
-		changes = make([]matchChange, 0, changeCap)
-	}
+	changeBuf := getMatchChangeBuffer(changeCap)
+	changes := changeBuf.changes
 
 	var next int
 	var ok bool
 	if m.backtracking {
-		next, ok, _ = m.matchBacktrackingFrom(dst, content, 0, trimSpace, changes)
+		next, ok, changes = m.matchBacktrackingFrom(dst, content, pos, trimSpace, changes)
 	} else {
-		next, ok, _ = m.matchFrom(dst, content, 0, trimSpace, changes)
+		next, ok, changes = m.matchFrom(dst, content, pos, trimSpace, changes)
 	}
+	putMatchChangeBuffer(changeBuf, changes)
 	return ok && next >= 0
 }
 
+func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) bool {
+	if m.accessRunner != nil {
+		if m.accessRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+		return false
+	}
+	if m.tomcatRunner != nil {
+		if m.tomcatRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+		return false
+	}
+	if m.postfixRunner != nil {
+		if m.postfixRunner.runTyped(dst, content[pos:], trimSpace, kinds) {
+			return true
+		}
+		resetAnyResults(dst)
+		return false
+	}
+	if pos == 0 && m.startOnlyRunner {
+		if pos == 0 && m.commonRunner != nil {
+			if m.commonRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.jenkinsRunner != nil {
+			if m.jenkinsRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.mysqlRunner != nil {
+			if m.mysqlRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.sqlserverRunner != nil {
+			if m.sqlserverRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.kafkaRunner != nil {
+			if m.kafkaRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.kingbaseRunner != nil {
+			if m.kingbaseRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.redisRunner != nil {
+			if m.redisRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.damengRunner != nil {
+			if m.damengRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.elasticRunner != nil {
+			if m.elasticRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.elasticDefaultRunner != nil {
+			if m.elasticDefaultRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.elasticSearchRunner != nil {
+			if m.elasticSearchRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.nginxErrorRunner != nil {
+			if m.nginxErrorRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.rabbitRunner != nil {
+			if m.rabbitRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+		if pos == 0 && m.solrRunner != nil {
+			if m.solrRunner.runTyped(dst, content, trimSpace, kinds) {
+				return true
+			}
+			resetAnyResults(dst)
+		}
+	}
+	if m.quickReject(content, pos) {
+		return false
+	}
+	if m.anchoredRunner != nil {
+		next, ok := m.anchoredRunner.runTypedAt(dst, content, pos, trimSpace, kinds)
+		return ok && next >= 0
+	}
+	if !m.backtracking && !m.changeLog {
+		next, ok := m.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+		return ok && next >= 0
+	}
+
+	changeCap := len(dst)
+	if m.changeCap > changeCap {
+		changeCap = m.changeCap
+	}
+	changeBuf := getTypedMatchChangeBuffer(changeCap)
+	changes := changeBuf.changes
+
+	var next int
+	var ok bool
+	if m.backtracking {
+		next, ok, changes = m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+	} else {
+		next, ok, changes = m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+	}
+	putTypedMatchChangeBuffer(changeBuf, changes)
+	return ok && next >= 0
+}
+
+func (m structuredMatcher) matchSearch(dst []string, content string, trimSpace bool) bool {
+	for pos := m.nextSearchPos(content, 0); pos <= len(content); pos = m.nextSearchPos(content, pos+1) {
+		resetStringResults(dst)
+		if m.matchTopAt(dst, content, pos, trimSpace) {
+			return true
+		}
+		if len(content)-pos < m.ir.MinWidth {
+			break
+		}
+	}
+	return false
+}
+
+func (m structuredMatcher) matchTypedSearch(dst []any, content string, trimSpace bool, kinds []valueKind) bool {
+	for pos := m.nextSearchPos(content, 0); pos <= len(content); pos = m.nextSearchPos(content, pos+1) {
+		resetAnyResults(dst)
+		if m.matchTypedTopAt(dst, content, pos, trimSpace, kinds) {
+			return true
+		}
+		if len(content)-pos < m.ir.MinWidth {
+			break
+		}
+	}
+	return false
+}
+
+func (m structuredMatcher) nextSearchPos(content string, pos int) int {
+	if pos <= 0 {
+		if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" {
+			idx := strings.Index(content, m.ir.FirstLiteral)
+			if idx < 0 {
+				return len(content) + 1
+			}
+			return idx
+		}
+		return 0
+	}
+	if pos > len(content) {
+		return len(content) + 1
+	}
+	if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" {
+		idx := strings.Index(content[pos:], m.ir.FirstLiteral)
+		if idx < 0 {
+			return len(content) + 1
+		}
+		return pos + idx
+	}
+	if pos == len(content) {
+		return pos
+	}
+	if content[pos] < utf8.RuneSelf {
+		return pos
+	}
+	_, size := utf8.DecodeRuneInString(content[pos:])
+	if size <= 0 {
+		return pos
+	}
+	return pos
+}
+
+func resetStringResults(dst []string) {
+	for i := range dst {
+		dst[i] = ""
+	}
+}
+
+func resetAnyResults(dst []any) {
+	for i := range dst {
+		dst[i] = nil
+	}
+}
+
 func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
 	if !m.backtracking && !m.changeLog && changes == nil {
 		next, ok := m.matchLinearFrom(dst, content, pos, trimSpace)
 		return next, ok, nil
@@ -962,6 +2173,9 @@ func (m structuredMatcher) matchAnyFrom(dst []string, content string, pos int, t
 }
 
 func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int, trimSpace bool) (int, bool) {
+	if m.quickReject(content, pos) {
+		return 0, false
+	}
 	for _, step := range m.steps {
 		var next int
 		var ok bool
@@ -976,6 +2190,9 @@ func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int
 					continue
 				}
 				return 0, false
+			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = maybeTrim(content[pos:pos+len(step.literal)], trimSpace)
 			}
 			pos += len(step.literal)
 			continue
@@ -1041,6 +2258,92 @@ func (m structuredMatcher) matchLinearFrom(dst []string, content string, pos int
 	return pos, true
 }
 
+func (m structuredMatcher) matchTypedLinearFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind) (int, bool) {
+	if m.quickReject(content, pos) {
+		return 0, false
+	}
+	for _, step := range m.steps {
+		var next int
+		var ok bool
+
+		switch {
+		case step.literal != "":
+			if !strings.HasPrefix(content[pos:], step.literal) {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex])
+			}
+			pos += len(step.literal)
+			continue
+		case step.parser != nil:
+			if step.optional && step.deterministicOptional && shouldSkipOptionalParser(step.parser, step, content, pos) {
+				continue
+			}
+			var value string
+			next, value, ok = step.parser.consume(content, pos)
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			if step.parser.dstIndex >= 0 {
+				dst[step.parser.dstIndex] = castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex])
+			}
+		case step.submatcher != nil:
+			next, ok = step.submatcher.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+			if step.captureIndex >= 0 {
+				dst[step.captureIndex] = castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex])
+			}
+		case len(step.alternatives) > 0:
+			alts := matchingAlternatives(step, content, pos)
+			for _, alt := range alts {
+				next, ok = alt.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+				if ok {
+					if step.captureIndex >= 0 {
+						dst[step.captureIndex] = castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex])
+					}
+					break
+				}
+			}
+			if !ok {
+				if step.optional {
+					if step.deterministicOptional && !step.optPrefixSkips && step.optPrefix != "" && strings.HasPrefix(content[pos:], step.optPrefix) {
+						return 0, false
+					}
+					continue
+				}
+				return 0, false
+			}
+		default:
+			continue
+		}
+
+		pos = next
+	}
+
+	return pos, true
+}
+
 func shouldSkipOptionalParser(p *structuredParser, step structuredStep, content string, pos int) bool {
 	if p == nil || pos > len(content) {
 		return false
@@ -1056,6 +2359,9 @@ func shouldSkipOptionalParser(p *structuredParser, step structuredStep, content 
 }
 
 func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
 	for _, step := range m.steps {
 		var next int
 		var ok bool
@@ -1067,6 +2373,9 @@ func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trim
 					continue
 				}
 				return 0, false, changes
+			}
+			if step.captureIndex >= 0 {
+				changes = appendMatchChange(dst, changes, step.captureIndex, maybeTrim(content[pos:pos+len(step.literal)], trimSpace))
 			}
 			pos += len(step.literal)
 			continue
@@ -1138,26 +2447,198 @@ func (m structuredMatcher) matchFrom(dst []string, content string, pos int, trim
 	return pos, true, changes
 }
 
+func (m structuredMatcher) matchTypedFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
+	for _, step := range m.steps {
+		var next int
+		var ok bool
+
+		switch {
+		case step.literal != "":
+			if !strings.HasPrefix(content[pos:], step.literal) {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			if step.captureIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex]))
+			}
+			pos += len(step.literal)
+			continue
+		case step.parser != nil:
+			var value string
+			next, value, ok = step.parser.consume(content, pos)
+			if !ok {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			if step.parser.dstIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.parser.dstIndex, castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex]))
+			}
+		case step.submatcher != nil:
+			mark := len(changes)
+			if step.submatcher.backtracking {
+				next, ok, changes = step.submatcher.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+			} else {
+				next, ok, changes = step.submatcher.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+			}
+			if !ok {
+				if step.submatcher.writes {
+					rollbackTypedMatchChanges(dst, changes, mark)
+					changes = changes[:mark]
+				}
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+			if step.captureIndex >= 0 {
+				changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+			}
+		case len(step.alternatives) > 0:
+			alts := matchingAlternatives(step, content, pos)
+			for _, alt := range alts {
+				mark := len(changes)
+				if alt.backtracking {
+					next, ok, changes = alt.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+				} else {
+					next, ok, changes = alt.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+				}
+				if ok {
+					if step.captureIndex >= 0 {
+						changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+					}
+					break
+				}
+				if alt.writes {
+					rollbackTypedMatchChanges(dst, changes, mark)
+					changes = changes[:mark]
+				}
+			}
+			if !ok {
+				if step.optional {
+					continue
+				}
+				return 0, false, changes
+			}
+		default:
+			continue
+		}
+
+		pos = next
+	}
+
+	return pos, true, changes
+}
+
 func (m structuredMatcher) matchBacktrackingFrom(dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	return matchStructuredSteps(m.steps, 0, dst, content, pos, trimSpace, changes)
+}
+
+func (m structuredMatcher) matchTypedBacktrackingFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	return matchTypedStructuredSteps(m.steps, 0, dst, content, pos, trimSpace, kinds, changes)
 }
 
 func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	if idx >= len(steps) {
 		return pos, true, changes
 	}
+	if len(content)-pos < steps[idx].tailMinWidth {
+		return 0, false, changes
+	}
 
 	step := steps[idx]
+	if step.parserBacktracking {
+		return matchStructuredBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, changes)
+	}
+
 	mark := len(changes)
+	if step.optional {
+		return matchStructuredOptionalStep(steps, idx, step, dst, content, pos, trimSpace, changes, mark)
+	}
+
 	next, ok, nextChanges := matchStructuredStep(step, dst, content, pos, trimSpace, changes)
-	if ok {
-		if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
-			return end, true, endChanges
+	if !ok {
+		return 0, false, changes[:mark]
+	}
+
+	if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
+		return end, true, endChanges
+	}
+
+	if step.writes {
+		rollbackMatchChanges(dst, nextChanges, mark)
+	}
+	return 0, false, changes[:mark]
+}
+
+func matchTypedStructuredSteps(steps []structuredStep, idx int, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if idx >= len(steps) {
+		return pos, true, changes
+	}
+	if len(content)-pos < steps[idx].tailMinWidth {
+		return 0, false, changes
+	}
+
+	step := steps[idx]
+	if step.parserBacktracking {
+		return matchTypedBacktrackingParserStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes)
+	}
+
+	mark := len(changes)
+	if step.optional {
+		return matchTypedOptionalStep(steps, idx, step, dst, content, pos, trimSpace, kinds, changes, mark)
+	}
+
+	next, ok, nextChanges := matchTypedStructuredStep(step, dst, content, pos, trimSpace, kinds, changes)
+	if !ok {
+		return 0, false, changes[:mark]
+	}
+
+	if end, okEnd, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, next, trimSpace, kinds, nextChanges); okEnd {
+		return end, true, endChanges
+	}
+
+	if step.writes {
+		rollbackTypedMatchChanges(dst, nextChanges, mark)
+	}
+	return 0, false, changes[:mark]
+}
+
+func matchStructuredBacktrackingParserStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
+	mark := len(changes)
+	rest := content[pos:]
+	end := len(rest)
+
+	for {
+		rel := lastLiteralIndex(rest[:end], step.parser.nextLiteral)
+		if rel < 0 {
+			break
 		}
-		if step.writes {
+
+		nextChanges := changes
+		segment := rest[:rel]
+		if !backtrackingParserSegmentOK(step.parser, segment) {
+			end = rel
+			continue
+		}
+		if step.parser.dstIndex >= 0 {
+			nextChanges = appendMatchChange(dst, nextChanges, step.parser.dstIndex, maybeTrim(segment, trimSpace))
+		}
+
+		if matchEnd, ok, endChanges := matchStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, nextChanges); ok {
+			return matchEnd, true, endChanges
+		}
+		if len(nextChanges) > mark {
 			rollbackMatchChanges(dst, nextChanges, mark)
 		}
-		nextChanges = nextChanges[:mark]
+
+		end = rel
 	}
 
 	if step.optional {
@@ -1167,11 +2648,94 @@ func matchStructuredSteps(steps []structuredStep, idx int, dst []string, content
 	return 0, false, changes[:mark]
 }
 
+func matchTypedBacktrackingParserStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	mark := len(changes)
+	rest := content[pos:]
+	end := len(rest)
+
+	for {
+		rel := lastLiteralIndex(rest[:end], step.parser.nextLiteral)
+		if rel < 0 {
+			break
+		}
+
+		nextChanges := changes
+		segment := rest[:rel]
+		if !backtrackingParserSegmentOK(step.parser, segment) {
+			end = rel
+			continue
+		}
+		if step.parser.dstIndex >= 0 {
+			nextChanges = appendTypedMatchChange(dst, nextChanges, step.parser.dstIndex, castStructuredValue(segment, trimSpace, kinds[step.parser.dstIndex]))
+		}
+
+		if matchEnd, ok, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, pos+rel, trimSpace, kinds, nextChanges); ok {
+			return matchEnd, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackTypedMatchChanges(dst, nextChanges, mark)
+		}
+
+		end = rel
+	}
+
+	if step.optional {
+		return matchTypedStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, kinds, changes[:mark])
+	}
+
+	return 0, false, changes[:mark]
+}
+
+func backtrackingParserSegmentOK(p *structuredParser, segment string) bool {
+	if p == nil {
+		return false
+	}
+	switch p.kind {
+	case structuredGreedyUntilLiteral:
+		return dotRunSegmentOK(p, segment)
+	case structuredNotSpace:
+		return segment != "" && strings.IndexAny(segment, " \t\r\n\f\v") < 0
+	default:
+		return false
+	}
+}
+
+func matchStructuredOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange, mark int) (int, bool, []matchChange) {
+	next, ok, nextChanges := matchStructuredStep(step, dst, content, pos, trimSpace, changes)
+	if ok {
+		if end, okEnd, endChanges := matchStructuredSteps(steps, idx+1, dst, content, next, trimSpace, nextChanges); okEnd {
+			return end, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackMatchChanges(dst, nextChanges, mark)
+		}
+	}
+
+	return matchStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, changes[:mark])
+}
+
+func matchTypedOptionalStep(steps []structuredStep, idx int, step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange, mark int) (int, bool, []typedMatchChange) {
+	next, ok, nextChanges := matchTypedStructuredStep(step, dst, content, pos, trimSpace, kinds, changes)
+	if ok {
+		if end, okEnd, endChanges := matchTypedStructuredSteps(steps, idx+1, dst, content, next, trimSpace, kinds, nextChanges); okEnd {
+			return end, true, endChanges
+		}
+		if len(nextChanges) > mark {
+			rollbackTypedMatchChanges(dst, nextChanges, mark)
+		}
+	}
+
+	return matchTypedStructuredSteps(steps, idx+1, dst, content, pos, trimSpace, kinds, changes[:mark])
+}
+
 func matchStructuredStep(step structuredStep, dst []string, content string, pos int, trimSpace bool, changes []matchChange) (int, bool, []matchChange) {
 	switch {
 	case step.literal != "":
 		if !strings.HasPrefix(content[pos:], step.literal) {
 			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			changes = appendMatchChange(dst, changes, step.captureIndex, maybeTrim(content[pos:pos+len(step.literal)], trimSpace))
 		}
 		return pos + len(step.literal), true, changes
 	case step.parser != nil:
@@ -1218,6 +2782,74 @@ func matchStructuredStep(step structuredStep, dst []string, content string, pos 
 	}
 }
 
+func matchTypedStructuredStep(step structuredStep, dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	switch {
+	case step.literal != "":
+		if !strings.HasPrefix(content[pos:], step.literal) {
+			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			changes = appendTypedMatchChange(dst, changes, step.captureIndex, castStructuredValue(content[pos:pos+len(step.literal)], trimSpace, kinds[step.captureIndex]))
+		}
+		return pos + len(step.literal), true, changes
+	case step.parser != nil:
+		next, value, ok := step.parser.consume(content, pos)
+		if !ok {
+			return 0, false, changes
+		}
+		if step.parser.dstIndex >= 0 {
+			changes = appendTypedMatchChange(dst, changes, step.parser.dstIndex, castStructuredValue(value, trimSpace, kinds[step.parser.dstIndex]))
+		}
+		return next, true, changes
+	case step.submatcher != nil:
+		mark := len(changes)
+		next, ok, nextChanges := step.submatcher.matchTypedAnyFrom(dst, content, pos, trimSpace, kinds, changes)
+		if !ok {
+			if step.submatcher.writes {
+				rollbackTypedMatchChanges(dst, nextChanges, mark)
+				nextChanges = nextChanges[:mark]
+			}
+			return 0, false, changes
+		}
+		if step.captureIndex >= 0 {
+			nextChanges = appendTypedMatchChange(dst, nextChanges, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+		}
+		return next, true, nextChanges
+	case len(step.alternatives) > 0:
+		for _, alt := range matchingAlternatives(step, content, pos) {
+			mark := len(changes)
+			next, ok, nextChanges := alt.matchTypedAnyFrom(dst, content, pos, trimSpace, kinds, changes)
+			if ok {
+				if step.captureIndex >= 0 {
+					nextChanges = appendTypedMatchChange(dst, nextChanges, step.captureIndex, castStructuredValue(content[pos:next], trimSpace, kinds[step.captureIndex]))
+				}
+				return next, true, nextChanges
+			}
+			if alt.writes {
+				rollbackTypedMatchChanges(dst, nextChanges, mark)
+				nextChanges = nextChanges[:mark]
+			}
+		}
+		return 0, false, changes
+	default:
+		return pos, true, changes
+	}
+}
+
+func (m structuredMatcher) matchTypedAnyFrom(dst []any, content string, pos int, trimSpace bool, kinds []valueKind, changes []typedMatchChange) (int, bool, []typedMatchChange) {
+	if m.quickReject(content, pos) {
+		return 0, false, changes
+	}
+	if !m.backtracking && !m.changeLog && changes == nil {
+		next, ok := m.matchTypedLinearFrom(dst, content, pos, trimSpace, kinds)
+		return next, ok, nil
+	}
+	if m.backtracking {
+		return m.matchTypedBacktrackingFrom(dst, content, pos, trimSpace, kinds, changes)
+	}
+	return m.matchTypedFrom(dst, content, pos, trimSpace, kinds, changes)
+}
+
 func matchingAlternatives(step structuredStep, content string, pos int) []*structuredMatcher {
 	if len(step.altPrefixes) == 0 {
 		return step.alternatives
@@ -1228,6 +2860,59 @@ func matchingAlternatives(step structuredStep, content string, pos int) []*struc
 		}
 	}
 	return nil
+}
+
+func (m structuredMatcher) quickReject(content string, pos int) bool {
+	if len(content)-pos < m.ir.MinWidth {
+		return true
+	}
+	if m.requiresStartWordBoundary(content, pos) {
+		return true
+	}
+	if m.ir.FirstLiteralExact && m.ir.FirstLiteral != "" && !strings.HasPrefix(content[pos:], m.ir.FirstLiteral) {
+		return true
+	}
+	return m.anchoredStart && requiredLiteralRejects(content[pos:], m.ir.FirstLiteral, m.required)
+}
+
+func (m structuredMatcher) requiresStartWordBoundary(content string, pos int) bool {
+	if len(m.steps) == 0 || pos <= 0 {
+		return false
+	}
+	step := m.steps[0]
+	if step.optional || step.literal != "" || step.parser == nil {
+		return false
+	}
+	switch step.parser.kind {
+	case structuredMonthName:
+		return isWordByte(content[pos-1])
+	default:
+		return false
+	}
+}
+
+func appendTypedMatchChange(dst []any, changes []typedMatchChange, idx int, value any) []typedMatchChange {
+	if idx < 0 {
+		return changes
+	}
+	changes = append(changes, typedMatchChange{idx: idx, prev: dst[idx]})
+	dst[idx] = value
+	return changes
+}
+
+func rollbackTypedMatchChanges(dst []any, changes []typedMatchChange, mark int) {
+	for i := len(changes) - 1; i >= mark; i-- {
+		change := changes[i]
+		dst[change.idx] = change.prev
+	}
+}
+
+func castStructuredValue(raw string, trimSpace bool, kind valueKind) any {
+	if trimSpace {
+		raw = trimMatch(raw)
+	}
+	v, _ := castValue(raw, kind)
+	return v
 }
 
 func appendMatchChange(dst []string, changes []matchChange, idx int, value string) []matchChange {
@@ -1250,6 +2935,29 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 	if pos > len(content) {
 		return 0, "", false
 	}
+	if p.wrapPrefix != "" || p.wrapSuffix != "" {
+		return p.consumeWrapped(content, pos)
+	}
+	if p.kind == structuredIPOrHost {
+		if seg, next, ok := sliceIPv4Literal(content, pos); ok {
+			return next, seg, true
+		}
+		if seg, next, ok := sliceIPv6Like(content, pos); ok {
+			return next, seg, true
+		}
+		seg, next, ok := sliceHostName(content, pos)
+		if !ok || !isHostnameMatchContext(content, pos, next, seg) {
+			return 0, "", false
+		}
+		return next, seg, true
+	}
+	if p.kind == structuredHostName {
+		seg, next, ok := sliceHostName(content, pos)
+		if !ok || !isHostnameMatchContext(content, pos, next, seg) {
+			return 0, "", false
+		}
+		return next, seg, true
+	}
 
 	segment, next, ok := p.slice(content, pos)
 	if !ok {
@@ -1258,10 +2966,14 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 
 	switch p.kind {
 	case structuredWord:
-		if !isApacheWord(segment) {
+		if !isWordMatchContext(content, pos, next, segment) {
 			return 0, "", false
 		}
-	case structuredHostName:
+	case structuredURIPath, structuredURIPathParam:
+		if segment == "" {
+			return 0, "", false
+		}
+	case structuredHostName, structuredIPOrHost:
 		if segment == "" {
 			return 0, "", false
 		}
@@ -1270,11 +2982,23 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredNotSpace:
-		if segment == "" || strings.IndexAny(segment, " \t\r\n\f\v") >= 0 {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredNumber:
 		if !isApacheNumber(segment) {
+			return 0, "", false
+		}
+	case structuredInt:
+		if !isApacheInt(segment) {
+			return 0, "", false
+		}
+	case structuredPosInt:
+		if !isApachePosInt(segment) {
+			return 0, "", false
+		}
+	case structuredNonNegInt:
+		if !isApacheNonNegInt(segment) {
 			return 0, "", false
 		}
 	case structuredMonthName:
@@ -1322,23 +3046,27 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 			return 0, "", false
 		}
 	case structuredUntilLiteral, structuredGreedyUntilLiteral:
-		if segment == "" && !p.allowEmpty {
+		if !dotRunSegmentOK(p, segment) {
+			return 0, "", false
+		}
+	case structuredSpaceOne:
+		if len(segment) != 1 || !isOnlyRegexpSpace(segment) {
 			return 0, "", false
 		}
 	case structuredSpacePlus:
-		if segment == "" || !isOnlySpace(segment) {
+		if segment == "" || !isOnlyRegexpSpace(segment) {
 			return 0, "", false
 		}
 	case structuredSpaceStar:
-		if !isOnlySpace(segment) {
+		if !isOnlyRegexpSpace(segment) {
 			return 0, "", false
 		}
 	case structuredTimestampISO8601:
-		if !looksLikeTimestampISO8601(segment) {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredHTTPDate:
-		if !looksLikeHTTPDate(segment) {
+		if segment == "" {
 			return 0, "", false
 		}
 	case structuredLogLevel:
@@ -1352,12 +3080,43 @@ func (p *structuredParser) consume(content string, pos int) (next int, value str
 	return next, segment, true
 }
 
+func (p *structuredParser) consumeWrapped(content string, pos int) (next int, value string, ok bool) {
+	if p.inner == nil {
+		return 0, "", false
+	}
+
+	if p.wrapPrefix != "" {
+		if !strings.HasPrefix(content[pos:], p.wrapPrefix) {
+			return 0, "", false
+		}
+		pos += len(p.wrapPrefix)
+	}
+
+	next, value, ok = p.inner.consume(content, pos)
+	if !ok {
+		return 0, "", false
+	}
+	if p.wrapSuffix != "" {
+		if !strings.HasPrefix(content[next:], p.wrapSuffix) {
+			return 0, "", false
+		}
+		next += len(p.wrapSuffix)
+	}
+	return next, value, true
+}
+
 func (p *structuredParser) slice(content string, pos int) (segment string, next int, ok bool) {
 	switch p.kind {
-	case structuredSpacePlus, structuredSpaceStar:
+	case structuredSpaceOne, structuredSpacePlus, structuredSpaceStar:
 		i := pos
-		for i < len(content) && isASCIISpace(content[i]) {
+		for i < len(content) && isRegexpASCIISpace(content[i]) {
 			i++
+		}
+		if p.kind == structuredSpaceOne {
+			if i == pos {
+				return "", 0, false
+			}
+			return content[pos : pos+1], pos + 1, true
 		}
 		if p.kind == structuredSpacePlus && i == pos {
 			return "", 0, false
@@ -1371,12 +3130,21 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			return sliceWord(content, pos)
 		case structuredHostName:
 			return sliceHostName(content, pos)
+		case structuredIPOrHost:
+			return sliceIPOrHost(content, pos)
+		case structuredURIPath:
+			return sliceURIPath(content, pos)
+		case structuredURIPathParam:
+			return sliceURIPathParam(content, pos)
 		case structuredCharClass:
+			if p.singleChar {
+				return sliceSingleCharClass(content, pos, p.charClass)
+			}
 			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredNotSpace:
 			return sliceNotSpaceWithContext(content, pos, p.nextParser, p.nextLiteral)
-		case structuredNumber:
-			return sliceNumberWithContext(content, pos, p.nextParser, p.nextLiteral)
+		case structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt:
+			return sliceNumericWithContext(content, pos, p.nextParser, p.nextLiteral, p.kind)
 		case structuredMonthName, structuredDayName:
 			return sliceAlphaToken(content, pos)
 		case structuredTimeOfDay:
@@ -1389,6 +3157,8 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 			return sliceQuoted(content, pos)
 		case structuredTimestampISO8601:
 			return sliceTimestampISO8601(content, pos)
+		case structuredHTTPDate:
+			return sliceHTTPDate(content, pos)
 		case structuredLogLevel:
 			return sliceLogLevelWithContext(content, pos, p.nextParser, p.nextLiteral)
 		}
@@ -1396,10 +3166,30 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 
 	if p.nextLiteral != "" {
 		switch p.kind {
+		case structuredUntilLiteral:
+			if (p.nextParser == structuredSpaceOne || p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
+			}
+		case structuredGreedyUntilLiteral:
+			if (p.nextParser == structuredSpaceOne || p.nextParser == structuredSpacePlus || p.nextParser == structuredSpaceStar) && p.nextLiteral != "" {
+				return sliceUntilSpaceOrLiteral(content, pos, p.nextLiteral)
+			}
+		case structuredWord:
+			return sliceWord(content, pos)
+		case structuredCharClass:
+			return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 		case structuredTimestampISO8601:
 			return sliceTimestampISO8601(content, pos)
+		case structuredHTTPDate:
+			return sliceHTTPDate(content, pos)
 		case structuredHostName:
 			return sliceHostName(content, pos)
+		case structuredIPOrHost:
+			return sliceIPOrHost(content, pos)
+		case structuredURIPath:
+			return sliceURIPath(content, pos)
+		case structuredURIPathParam:
+			return sliceURIPathParam(content, pos)
 		case structuredMonthName, structuredDayName:
 			return sliceAlphaToken(content, pos)
 		case structuredTimeOfDay:
@@ -1428,12 +3218,27 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		return sliceWord(content, pos)
 	case structuredHostName:
 		return sliceHostName(content, pos)
+	case structuredIPOrHost:
+		return sliceIPOrHost(content, pos)
+	case structuredURIPath:
+		return sliceURIPath(content, pos)
+	case structuredURIPathParam:
+		return sliceURIPathParam(content, pos)
 	case structuredCharClass:
+		if p.singleChar {
+			return sliceSingleCharClass(content, pos, p.charClass)
+		}
 		return sliceCharClass(content, pos, p.charClass, p.allowEmpty)
 	case structuredNotSpace:
 		return sliceNotSpace(content, pos)
 	case structuredNumber:
 		return sliceNumber(content, pos)
+	case structuredInt:
+		return sliceInt(content, pos)
+	case structuredPosInt:
+		return slicePosInt(content, pos)
+	case structuredNonNegInt:
+		return sliceNonNegInt(content, pos)
 	case structuredMonthName, structuredDayName:
 		return sliceAlphaToken(content, pos)
 	case structuredTimeOfDay:
@@ -1446,16 +3251,30 @@ func (p *structuredParser) slice(content string, pos int) (segment string, next 
 		return sliceQuoted(content, pos)
 	case structuredTimestampISO8601:
 		return sliceTimestampISO8601(content, pos)
+	case structuredHTTPDate:
+		return sliceHTTPDate(content, pos)
 	case structuredLogLevel:
 		return sliceLogLevel(content, pos)
+	case structuredUntilLiteral, structuredGreedyUntilLiteral:
+		return sliceDotRun(content, pos, p.allowEmpty, p.dotAll)
 	}
 
 	return content[pos:], len(content), true
 }
 
+func dotRunSegmentOK(p *structuredParser, segment string) bool {
+	if p == nil {
+		return false
+	}
+	if segment == "" && !p.allowEmpty {
+		return false
+	}
+	return p.dotAll || strings.IndexByte(segment, '\n') < 0
+}
+
 func canParserEndWithoutLiteral(kind structuredKind) bool {
 	switch kind {
-	case structuredWord, structuredHostName, structuredCharClass, structuredNotSpace, structuredNumber, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredLogLevel:
+	case structuredWord, structuredHostName, structuredIPOrHost, structuredURIPath, structuredURIPathParam, structuredCharClass, structuredNotSpace, structuredNumber, structuredInt, structuredPosInt, structuredNonNegInt, structuredMonthName, structuredDayName, structuredTimeOfDay, structuredYear, structuredMonthNum, structuredMonthDay, structuredHour, structuredMinute, structuredSecond, structuredQuoted, structuredSpaceOne, structuredSpacePlus, structuredSpaceStar, structuredTimestampISO8601, structuredHTTPDate, structuredLogLevel:
 		return true
 	default:
 		return false
@@ -1473,6 +3292,52 @@ func sliceWord(content string, pos int) (string, int, bool) {
 	return content[start:pos], pos, true
 }
 
+func isWordMatchContext(content string, start int, end int, segment string) bool {
+	if segment == "" ||
+		end-start != len(segment) ||
+		!hasRegexpWordBoundary(content, start) ||
+		!hasRegexpWordBoundary(content, end) {
+		return false
+	}
+	for i := 0; i < len(segment); i++ {
+		if !isWordByte(segment[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sliceURIPath(content string, pos int) (string, int, bool) {
+	if pos >= len(content) || content[pos] != '/' {
+		return "", 0, false
+	}
+	i := pos + 1
+	for i < len(content) {
+		c := content[i]
+		if isURIPathChar(c) {
+			i++
+			continue
+		}
+		break
+	}
+	return content[pos:i], i, true
+}
+
+func sliceURIPathParam(content string, pos int) (string, int, bool) {
+	_, next, ok := sliceURIPath(content, pos)
+	if !ok {
+		return "", 0, false
+	}
+	i := next
+	if i < len(content) && content[i] == '?' {
+		i++
+		for i < len(content) && isURIParamChar(content[i]) {
+			i++
+		}
+	}
+	return content[pos:i], i, true
+}
+
 func isHostnameStartByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
@@ -1486,13 +3351,20 @@ func sliceCharClass(content string, pos int, class *asciiCharClass, allowEmpty b
 		return "", 0, false
 	}
 	start := pos
-	for pos < len(content) && class.table[content[pos]] {
+	for pos < len(content) && class.Table[content[pos]] {
 		pos++
 	}
 	if pos == start && !allowEmpty {
 		return "", 0, false
 	}
 	return content[start:pos], pos, true
+}
+
+func sliceSingleCharClass(content string, pos int, class *asciiCharClass) (string, int, bool) {
+	if class == nil || pos >= len(content) || !class.Table[content[pos]] {
+		return "", 0, false
+	}
+	return content[pos : pos+1], pos + 1, true
 }
 
 func sliceNotSpace(content string, pos int) (string, int, bool) {
@@ -1511,51 +3383,164 @@ func sliceHostName(content string, pos int) (string, int, bool) {
 	if pos >= len(content) || !isHostnameStartByte(content[pos]) {
 		return "", 0, false
 	}
-	pos++
-	for pos < len(content) && isHostnameByte(content[pos]) {
+	for {
+		labelStart := pos
+		for pos < len(content) && (isHostnameStartByte(content[pos]) || content[pos] == '-') {
+			pos++
+		}
+		if pos-labelStart > 63 {
+			if labelStart == start {
+				return "", 0, false
+			}
+			return content[start:labelStart], labelStart, true
+		}
+		if pos >= len(content) || content[pos] != '.' {
+			return content[start:pos], pos, true
+		}
+		if pos+1 >= len(content) || !isHostnameStartByte(content[pos+1]) {
+			return content[start : pos+1], pos + 1, true
+		}
 		pos++
+	}
+}
+
+func sliceIPOrHost(content string, pos int) (string, int, bool) {
+	if seg, next, ok := sliceIPv4Literal(content, pos); ok {
+		return seg, next, true
+	}
+	if seg, next, ok := sliceIPv6Like(content, pos); ok {
+		return seg, next, true
+	}
+	return sliceHostName(content, pos)
+}
+
+func sliceIPv4Literal(content string, pos int) (string, int, bool) {
+	start := pos
+	for part := 0; part < 4; part++ {
+		if pos >= len(content) || !isASCIIDigit(content[pos]) {
+			return "", 0, false
+		}
+
+		val := 0
+		digits := 0
+		for pos < len(content) && isASCIIDigit(content[pos]) {
+			val = val*10 + int(content[pos]-'0')
+			digits++
+			if digits > 3 || val > 255 {
+				return "", 0, false
+			}
+			pos++
+		}
+		if part == 3 {
+			break
+		}
+		if pos >= len(content) || content[pos] != '.' {
+			return "", 0, false
+		}
+		pos++
+	}
+
+	if pos < len(content) && (isHostnameByte(content[pos]) || content[pos] == ':') {
+		return "", 0, false
 	}
 	return content[start:pos], pos, true
 }
 
 func sliceNotSpaceWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
-		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral)
+	if nextLiteral != "" {
+		requireSpace := nextParser == structuredSpaceOne || nextParser == structuredSpacePlus
+		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral, requireSpace)
 	}
 	return sliceNotSpace(content, pos)
 }
 
 func sliceNumber(content string, pos int) (string, int, bool) {
 	start := pos
+	signed := false
+	if pos < len(content) && (content[pos] == '+' || content[pos] == '-') {
+		signed = true
+		pos++
+	}
+	digitsStart := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	if pos == digitsStart {
+		if signed || pos >= len(content) || content[pos] != '.' {
+			return "", 0, false
+		}
+		pos++
+		fracStart := pos
+		for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+			pos++
+		}
+		if pos == fracStart {
+			return "", 0, false
+		}
+		return content[start:pos], pos, true
+	}
+	if pos < len(content) && content[pos] == '.' && pos+1 < len(content) && content[pos+1] >= '0' && content[pos+1] <= '9' {
+		pos += 2
+		for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+			pos++
+		}
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceInt(content string, pos int) (string, int, bool) {
+	start := pos
 	if pos < len(content) && (content[pos] == '+' || content[pos] == '-') {
 		pos++
 	}
-	digits := 0
-	dotSeen := false
-	for pos < len(content) {
-		switch {
-		case content[pos] >= '0' && content[pos] <= '9':
-			digits++
-			pos++
-		case content[pos] == '.' && !dotSeen:
-			dotSeen = true
-			pos++
-		default:
-			goto done
-		}
+	digitsStart := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
 	}
-done:
-	if digits == 0 {
+	if pos == digitsStart {
 		return "", 0, false
 	}
 	return content[start:pos], pos, true
 }
 
-func sliceNumberWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
-		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral)
+func slicePosInt(content string, pos int) (string, int, bool) {
+	if pos >= len(content) || content[pos] < '1' || content[pos] > '9' {
+		return "", 0, false
 	}
-	return sliceNumber(content, pos)
+	start := pos
+	pos++
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceNonNegInt(content string, pos int) (string, int, bool) {
+	start := pos
+	for pos < len(content) && content[pos] >= '0' && content[pos] <= '9' {
+		pos++
+	}
+	if pos == start {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceNumericWithContext(content string, pos int, nextParser structuredKind, nextLiteral string, kind structuredKind) (string, int, bool) {
+	if nextLiteral != "" {
+		requireSpace := nextParser == structuredSpaceOne || nextParser == structuredSpacePlus
+		return sliceTokenBeforeSpaceOrLiteral(content, pos, nextLiteral, requireSpace)
+	}
+	switch kind {
+	case structuredInt:
+		return sliceInt(content, pos)
+	case structuredPosInt:
+		return slicePosInt(content, pos)
+	case structuredNonNegInt:
+		return sliceNonNegInt(content, pos)
+	default:
+		return sliceNumber(content, pos)
+	}
 }
 
 func sliceQuoted(content string, pos int) (string, int, bool) {
@@ -1587,6 +3572,14 @@ func sliceTimestampISO8601(content string, pos int) (string, int, bool) {
 	return content[pos:next], next, true
 }
 
+func sliceHTTPDate(content string, pos int) (string, int, bool) {
+	next, ok := consumeHTTPDate(content, pos)
+	if !ok || next == pos {
+		return "", 0, false
+	}
+	return content[pos:next], next, true
+}
+
 func sliceLogLevel(content string, pos int) (string, int, bool) {
 	start := pos
 	for pos < len(content) {
@@ -1604,7 +3597,7 @@ func sliceLogLevel(content string, pos int) (string, int, bool) {
 }
 
 func sliceLogLevelWithContext(content string, pos int, nextParser structuredKind, nextLiteral string) (string, int, bool) {
-	if (nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
+	if (nextParser == structuredSpaceOne || nextParser == structuredSpacePlus || nextParser == structuredSpaceStar) && nextLiteral != "" {
 		start := pos
 		for pos < len(content) {
 			c := content[pos]
@@ -1622,8 +3615,55 @@ func sliceLogLevelWithContext(content string, pos int, nextParser structuredKind
 	return sliceLogLevel(content, pos)
 }
 
-func sliceTokenBeforeSpaceOrLiteral(content string, pos int, nextLiteral string) (string, int, bool) {
+func sliceTokenBeforeSpaceOrLiteral(content string, pos int, nextLiteral string, requireSpace bool) (string, int, bool) {
 	if nextLiteral == "" || pos >= len(content) {
+		return "", 0, false
+	}
+
+	tokenEnd := pos
+	for tokenEnd < len(content) && !isRegexpASCIISpace(content[tokenEnd]) {
+		tokenEnd++
+	}
+
+	if tokenEnd == pos {
+		return "", 0, false
+	}
+
+	searchEnd := tokenEnd
+	if tokenEnd < len(content) {
+		litPos := tokenEnd
+		for litPos < len(content) && isRegexpASCIISpace(content[litPos]) {
+			litPos++
+		}
+		searchEnd = litPos
+		expected := nextLiteral
+		if litPos > tokenEnd {
+			for len(expected) > 0 && isRegexpASCIISpace(expected[0]) {
+				expected = expected[1:]
+			}
+		}
+		if expected != "" && strings.HasPrefix(content[litPos:], expected) {
+			if requireSpace && litPos == tokenEnd {
+				return "", 0, false
+			}
+			return content[pos:tokenEnd], tokenEnd, true
+		}
+	}
+
+	if requireSpace {
+		return "", 0, false
+	}
+
+	rel := lastLiteralIndex(content[pos:searchEnd], nextLiteral)
+	if rel <= 0 {
+		return "", 0, false
+	}
+	tokenEnd = pos + rel
+	return content[pos:tokenEnd], tokenEnd, true
+}
+
+func sliceUntilSpaceOrLiteral(content string, pos int, nextLiteral string) (string, int, bool) {
+	if nextLiteral == "" || pos > len(content) {
 		return "", 0, false
 	}
 
@@ -1631,20 +3671,19 @@ func sliceTokenBeforeSpaceOrLiteral(content string, pos int, nextLiteral string)
 	for i := pos; i < len(content); i++ {
 		c := content[i]
 		if c == first && strings.HasPrefix(content[i:], nextLiteral) {
-			return content[pos:i], i, i > pos
+			return content[pos:i], i, true
 		}
-		if !isASCIISpace(c) {
+		if !isRegexpASCIISpace(c) {
 			continue
 		}
 
 		j := i
-		for j < len(content) && isASCIISpace(content[j]) {
+		for j < len(content) && isRegexpASCIISpace(content[j]) {
 			j++
 		}
 		if strings.HasPrefix(content[j:], nextLiteral) {
-			return content[pos:i], i, i > pos
+			return content[pos:i], i, true
 		}
-		return "", 0, false
 	}
 	return "", 0, false
 }
@@ -1740,13 +3779,135 @@ func sliceDigitsAndPunct(content string, pos int) (string, int, bool) {
 	return content[start:pos], pos, true
 }
 
-func isOnlySpace(s string) bool {
+func sliceDotRun(content string, pos int, allowEmpty bool, dotAll bool) (string, int, bool) {
+	start := pos
+	for pos < len(content) && (dotAll || content[pos] != '\n') {
+		pos++
+	}
+	if !allowEmpty && pos == start {
+		return "", 0, false
+	}
+	return content[start:pos], pos, true
+}
+
+func sliceIPv6Like(content string, pos int) (string, int, bool) {
+	start := pos
+	colons := 0
+	for pos < len(content) {
+		c := content[pos]
+		switch {
+		case c >= '0' && c <= '9':
+			pos++
+		case c >= 'A' && c <= 'F':
+			pos++
+		case c >= 'a' && c <= 'f':
+			pos++
+		case c == ':' || c == '.':
+			if c == ':' {
+				colons++
+			}
+			pos++
+		default:
+			goto done
+		}
+	}
+done:
+	if pos == start || colons < 2 {
+		return "", 0, false
+	}
+	if pos < len(content) && content[pos] == '%' {
+		zoneStart := pos
+		pos++
+		for pos < len(content) && content[pos] != '\n' {
+			pos++
+		}
+		if pos == zoneStart+1 {
+			pos = zoneStart
+		}
+	}
+	segment := content[start:pos]
+	ipSegment := segment
+	if zone := strings.IndexByte(ipSegment, '%'); zone >= 0 {
+		ipSegment = ipSegment[:zone]
+	}
+	if net.ParseIP(ipSegment) == nil || !strings.Contains(ipSegment, ":") {
+		return "", 0, false
+	}
+	return segment, pos, true
+}
+
+func isURIPathChar(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= 'a' && c <= 'z':
+		return true
+	case c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '/', '$', '.', '+', '!', '*', '\'', '(', ')', '{', '}', ',', '~', ':', ';', '=', '@', '#', '%', '_', '-':
+		return true
+	default:
+		return false
+	}
+}
+
+func isURIParamChar(c byte) bool {
+	if isURIPathChar(c) {
+		return true
+	}
+	switch c {
+	case '?', '&', '|', '[', ']', '<', '>':
+		return true
+	default:
+		return false
+	}
+}
+
+func isOnlyRegexpSpace(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if !isASCIISpace(s[i]) {
+		if !isRegexpASCIISpace(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func isRegexpASCIISpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\f':
+		return true
+	default:
+		return false
+	}
+}
+
+func isStructuredIPLiteral(s string) bool {
+	if strings.IndexByte(s, ':') >= 0 {
+		return true
+	}
+	_, _, ok := sliceIPv4Literal(s, 0)
+	return ok
+}
+
+func isHostnameMatchContext(content string, start int, end int, segment string) bool {
+	if !hasRegexpWordBoundary(content, start) {
+		return false
+	}
+	if strings.HasSuffix(segment, ".") {
+		return true
+	}
+	if end >= len(content) || !isWordByte(content[end]) {
+		return true
+	}
+	return hasRegexpWordBoundary(content, end)
+}
+
+func hasRegexpWordBoundary(content string, idx int) bool {
+	prevWord := idx > 0 && isWordByte(content[idx-1])
+	nextWord := idx < len(content) && isWordByte(content[idx])
+	return prevWord != nextWord
 }
 
 func isYearValue(s string) bool {
@@ -1778,7 +3939,7 @@ func isSecondValue(s string) bool {
 		return false
 	}
 	main := s
-	if idx := strings.IndexAny(s, ".,"); idx >= 0 {
+	if idx := strings.IndexAny(s, ".,:"); idx >= 0 {
 		main = s[:idx]
 		if idx == len(s)-1 {
 			return false
@@ -1790,7 +3951,7 @@ func isSecondValue(s string) bool {
 		}
 	}
 	n, ok := parsePositiveInt(main)
-	return ok && n >= 0 && n <= 60 && len(main) >= 1 && len(main) <= 2
+	return ok && n >= 0 && n <= 60 && len(main) == 2
 }
 
 func parsePositiveInt(s string) (int, bool) {
@@ -1808,27 +3969,8 @@ func parsePositiveInt(s string) (int, bool) {
 }
 
 func looksLikeTimestampISO8601(s string) bool {
-	if len(s) < 16 {
-		return false
-	}
-	hasDateSep := false
-	hasTimeSep := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9':
-		case c == '-' || c == '/' || c == 'T' || c == ':' || c == '.' || c == ',' || c == '+' || c == 'Z' || c == 'z' || c == ' ':
-			if c == '-' || c == '/' {
-				hasDateSep = true
-			}
-			if c == ':' {
-				hasTimeSep = true
-			}
-		default:
-			return false
-		}
-	}
-	return hasDateSep && hasTimeSep
+	next, ok := consumeTimestampISO8601(s, 0)
+	return ok && next == len(s)
 }
 
 func looksLikeTimeOfDay(s string) bool {
@@ -1837,10 +3979,8 @@ func looksLikeTimeOfDay(s string) bool {
 }
 
 func looksLikeHTTPDate(s string) bool {
-	if len(s) < 20 {
-		return false
-	}
-	return strings.Count(s, "/") >= 2 && strings.Count(s, ":") >= 2
+	next, ok := consumeHTTPDate(s, 0)
+	return ok && next == len(s)
 }
 
 func isLogLevel(s string) bool {
