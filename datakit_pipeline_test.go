@@ -48,6 +48,20 @@ func TestDatakitFixturesMatchRegexp(t *testing.T) {
 	}
 }
 
+func TestDatakitFixturesWithTypeInfoMatchRegexp(t *testing.T) {
+	fixtures, _ := loadMatchedDatakitFixtures(t)
+	if len(fixtures) == 0 {
+		t.Fatal("expected matched Datakit grok fixtures")
+	}
+
+	for _, fixture := range fixtures {
+		fixture := fixture
+		t.Run(fixture.name, func(t *testing.T) {
+			assertTypedRunParity(t, fixture.current, fixture.regexpOnly, fixture.line, true)
+		})
+	}
+}
+
 func BenchmarkDatakitFixtures(b *testing.B) {
 	fixtures, _ := loadMatchedDatakitFixtures(b)
 	if len(fixtures) == 0 {
@@ -73,6 +87,42 @@ func BenchmarkDatakitFixtures(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.regexpOnly.Run(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkDatakitFixturesWithTypeInfo(b *testing.B) {
+	fixtures, _ := loadMatchedDatakitFixtures(b)
+	if len(fixtures) == 0 {
+		b.Fatal("expected matched datakit grok fixtures")
+	}
+
+	for _, fixture := range fixtures {
+		fixture := fixture
+		b.Run(fixture.name+"/fast", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.current.RunWithTypeInfo(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(fixture.name+"/regexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.regexpOnly.RunWithTypeInfo(fixture.line, true)
 				if err != nil {
 					b.Fatal(err)
 				}

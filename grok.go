@@ -150,7 +150,7 @@ func (g *GrokRegexp) RunWithTypeInfo(content string, trimSpace bool) ([]any, err
 
 func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any) ([]any, error) {
 	if g.fastMatcher != nil {
-		castDst := ensureAnyBuffer(dst, len(g.subMatchNames.name))
+		castDst := ensureTypedBuffer(dst, g.valueKinds)
 		if g.fastMatcher.matchTyped(castDst, content, trimSpace, g.valueKinds) {
 			return castDst, nil
 		}
@@ -161,7 +161,7 @@ func (g *GrokRegexp) runWithTypeInfoTo(content string, trimSpace bool, dst []any
 		return nil, err
 	}
 
-	castDst := ensureAnyBuffer(dst, len(g.subMatchNames.name))
+	castDst := ensureTypedBuffer(dst, g.valueKinds)
 
 	for i := range g.subMatchNames.name {
 		raw := extractMatch(content, match, g.subMatchNames.subexpIndex[i], trimSpace)
@@ -215,6 +215,14 @@ func ensureStringBuffer(dst []string, size int) []string {
 
 func ensureAnyBuffer(dst []any, size int) []any {
 	return clearAnyBuffer(dst, size)
+}
+
+func ensureTypedBuffer(dst []any, kinds []valueKind) []any {
+	dst = clearAnyBuffer(dst, len(kinds))
+	for i := range dst {
+		dst[i], _ = castValue("", kinds[i])
+	}
+	return dst
 }
 
 func newStringBufferPool(size int) *stringBufferPool {

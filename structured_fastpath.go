@@ -2056,6 +2056,7 @@ func (m structuredMatcher) matchTypedTopAt(dst []any, content string, pos int, t
 			resetAnyResults(dst)
 		}
 	}
+	resetTypedResults(dst, kinds)
 	if m.quickReject(content, pos) {
 		return false
 	}
@@ -2155,6 +2156,12 @@ func resetStringResults(dst []string) {
 func resetAnyResults(dst []any) {
 	for i := range dst {
 		dst[i] = nil
+	}
+}
+
+func resetTypedResults(dst []any, kinds []valueKind) {
+	for i := range dst {
+		dst[i], _ = castValue("", kinds[i])
 	}
 }
 

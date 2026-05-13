@@ -144,6 +144,14 @@ func TestOfficialLogCasesMatchRegexp(t *testing.T) {
 	}
 }
 
+func TestOfficialLogCasesWithTypeInfoMatchRegexp(t *testing.T) {
+	for _, fixture := range loadOfficialLogFixtures(t) {
+		t.Run(fixture.name, func(t *testing.T) {
+			assertTypedRunParity(t, fixture.current, fixture.regexpOnly, fixture.line, true)
+		})
+	}
+}
+
 func BenchmarkOfficialLogCases(b *testing.B) {
 	for _, fixture := range loadOfficialLogFixtures(b) {
 		fixture := fixture
@@ -163,6 +171,36 @@ func BenchmarkOfficialLogCases(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.regexpOnly.Run(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkOfficialLogCasesWithTypeInfo(b *testing.B) {
+	for _, fixture := range loadOfficialLogFixtures(b) {
+		fixture := fixture
+		b.Run(fixture.name+"/fast", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.current.RunWithTypeInfo(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+		b.Run(fixture.name+"/regexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.regexpOnly.RunWithTypeInfo(fixture.line, true)
 				if err != nil {
 					b.Fatal(err)
 				}

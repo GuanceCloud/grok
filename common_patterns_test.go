@@ -185,6 +185,19 @@ func TestCommonComposedPatternsMatchRegexp(t *testing.T) {
 	}
 }
 
+func TestCommonComposedPatternsWithTypeInfoMatchRegexp(t *testing.T) {
+	fixtures := loadCommonPatternFixtures(t)
+	if len(fixtures) == 0 {
+		t.Fatal("expected common pattern fixtures")
+	}
+
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			assertTypedRunParity(t, fixture.current, fixture.regexpOnly, fixture.line, true)
+		})
+	}
+}
+
 func TestControllerRuntimePatternUsesFastMatcher(t *testing.T) {
 	fixtures := loadCommonPatternFixtures(t)
 	for _, fixture := range fixtures {
@@ -246,6 +259,42 @@ func TestCustomAliasPostfixUsesRunner(t *testing.T) {
 		return
 	}
 	t.Fatal("expected custom postfix fixture")
+}
+
+func BenchmarkCommonComposedPatternsWithTypeInfo(b *testing.B) {
+	fixtures := loadCommonPatternFixtures(b)
+	if len(fixtures) == 0 {
+		b.Fatal("expected common pattern fixtures")
+	}
+
+	for _, fixture := range fixtures {
+		fixture := fixture
+		b.Run(fixture.name+"/fast", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.current.RunWithTypeInfo(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+
+		b.Run(fixture.name+"/regexp", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ret, err := fixture.regexpOnly.RunWithTypeInfo(fixture.line, true)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(ret) == 0 {
+					b.Fatal("empty result")
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkCommonComposedPatterns(b *testing.B) {
