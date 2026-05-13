@@ -83,9 +83,9 @@ func TestStructuredIRMetadata(t *testing.T) {
 
 func TestStructuredCharClassInverseEscapesParity(t *testing.T) {
 	patterns := CopyDefalutPatterns()
-	patterns["ANY"] = `[\\s\\S]*`
-	patterns["NONDIGITS"] = `[\\D]*`
-	patterns["NONWORDS"] = `[\\W]*`
+	patterns["ANY"] = `[\s\S]*`
+	patterns["NONDIGITS"] = `[\D]*`
+	patterns["NONWORDS"] = `[\W]*`
 
 	denorm, errs := DenormalizePatternsFromMap(patterns)
 	if len(errs) > 0 {
@@ -145,6 +145,417 @@ func TestStructuredCharClassInverseEscapesParity(t *testing.T) {
 	}
 }
 
+func TestStructuredFastPathUnsupportedRegexSyntaxFallsBack(t *testing.T) {
+	cases := []struct {
+		name       string
+		customName string
+		customRe   string
+		pattern    string
+		line       string
+		want       string
+		wantMatch  bool
+	}{
+		{
+			name:       "non ascii char class",
+			customName: "EACUTE",
+			customRe:   `[é]`,
+			pattern:    `%{EACUTE:item}`,
+			line:       "é",
+			want:       "é",
+			wantMatch:  true,
+		},
+		{
+			name:       "hex escape char class",
+			customName: "HEXPROG",
+			customRe:   `[\x21-\x5a\x5c\x5e-\x7e]+`,
+			pattern:    `%{HEXPROG:item}`,
+			line:       "!AZ",
+			want:       "!AZ",
+			wantMatch:  true,
+		},
+		{
+			name:       "default PROG hex escape char class",
+			customName: "",
+			customRe:   "",
+			pattern:    `%{PROG:item}`,
+			line:       "!AZ",
+			want:       "!AZ",
+			wantMatch:  true,
+		},
+		{
+			name:       "posix char class",
+			customName: "POSIXD",
+			customRe:   `[[:digit:]]+`,
+			pattern:    `%{POSIXD:item}`,
+			line:       "5",
+			want:       "5",
+			wantMatch:  true,
+		},
+		{
+			name:       "unicode property char class",
+			customName: "HAN",
+			customRe:   `[\p{Han}]+`,
+			pattern:    `%{HAN:item}`,
+			line:       "中",
+			want:       "中",
+			wantMatch:  true,
+		},
+		{
+			name:       "raw digit escape",
+			customName: "DIGIT",
+			customRe:   `\d`,
+			pattern:    `%{DIGIT:item}`,
+			line:       "5",
+			want:       "5",
+			wantMatch:  true,
+		},
+		{
+			name:       "raw form feed escape",
+			customName: "FORMFEED",
+			customRe:   `\f`,
+			pattern:    `%{FORMFEED:item}`,
+			line:       "\f",
+			want:       "\f",
+			wantMatch:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			patterns := CopyDefalutPatterns()
+			if tc.customName != "" {
+				patterns[tc.customName] = tc.customRe
+			}
+			denorm, errs := DenormalizePatternsFromMap(patterns)
+			if len(errs) > 0 {
+				t.Fatal(errs)
+			}
+
+			g, err := CompilePattern(tc.pattern, PatternStorage{denorm})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g.fastMatcher != nil {
+				t.Fatal("expected regexp fallback for unsupported fast-path syntax")
+			}
+
+			ret, err := g.Run(tc.line, false)
+			if !tc.wantMatch {
+				assert.ErrorIs(t, err, ErrMismatch)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.want, ret[g.nameIndex["item"]])
+		})
+	}
+}
+
+func TestStructuredSingleDotMatchesRegexp(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["DOT"] = `.`
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	storage := PatternStorage{denorm}
+
+	cases := []struct {
+		name    string
+		pattern string
+		lines   []string
+	}{
+		{
+			name:    "custom alias",
+			pattern: `%{DOT:item}`,
+			lines:   []string{"x", "é", "\xff", "\n"},
+		},
+		{
+			name:    "literal middle",
+			pattern: `a.c`,
+			lines:   []string{"abc", "xxabc", "aéc", "xxaéc", "a\nc"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected structured fast matcher")
+			}
+			regexpOnly, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			for _, line := range tc.lines {
+				assertRunParity(t, current, regexpOnly, line, false)
+			}
+		})
+	}
+}
+
+func TestStructuredFastPathDefaultPatternFallbacks(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+		want    bool
+	}{
+		{
+			name:    "ip does not accept hostname",
+			pattern: `%{IP:item}`,
+			line:    "example.com",
+			want:    false,
+		},
+		{
+			name:    "path requires path syntax",
+			pattern: `%{PATH:item}`,
+			line:    "plain-token",
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = g.Run(tc.line, false)
+			if tc.want {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, ErrMismatch)
+			}
+		})
+	}
+}
+
+func TestStructuredGreedyLinesMatchesRegexpAcrossNewline(t *testing.T) {
+	pattern := `%{GREEDYLINES:item}END`
+	line := "alpha\nbetaEND"
+
+	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected GREEDYLINES to use structured fast matcher")
+	}
+
+	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	assertRunParity(t, current, regexpOnly, line, false)
+}
+
+func TestStructuredNegatedCharClassMatchesRegexp(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["SINGLE_NOTHASH"] = `[^#]`
+	patterns["NOTHASH"] = `[^#]+`
+	patterns["NONDIGITS"] = `[^0-9]+`
+
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	storage := PatternStorage{denorm}
+
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+	}{
+		{
+			name:    "single excluded char mismatches",
+			pattern: `%{SINGLE_NOTHASH:item}`,
+			line:    "#",
+		},
+		{
+			name:    "single ascii char matches",
+			pattern: `%{SINGLE_NOTHASH:item}`,
+			line:    "a",
+		},
+		{
+			name:    "single unicode char matches whole rune",
+			pattern: `%{SINGLE_NOTHASH:item}`,
+			line:    "é",
+		},
+		{
+			name:    "excluded char mismatches",
+			pattern: `%{NOTHASH:item}`,
+			line:    "#",
+		},
+		{
+			name:    "ascii text matches",
+			pattern: `%{NOTHASH:item}`,
+			line:    "abc",
+		},
+		{
+			name:    "unicode text matches",
+			pattern: `%{NOTHASH:item}`,
+			line:    "é",
+		},
+		{
+			name:    "excluded digit mismatches",
+			pattern: `%{NONDIGITS:item}`,
+			line:    "5",
+		},
+		{
+			name:    "non digit text matches",
+			pattern: `%{NONDIGITS:item}`,
+			line:    "abc-",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected structured fast matcher")
+			}
+			regexpOnly, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			assertRunParity(t, current, regexpOnly, tc.line, false)
+		})
+	}
+}
+
+func TestStructuredEndAnchorMatchesRegexp(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		lines   []string
+	}{
+		{
+			name:    "word",
+			pattern: `%{WORD:item}$`,
+			lines:   []string{"abc", "abc "},
+		},
+		{
+			name:    "access runner shape",
+			pattern: `%{IPORHOST:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}$`,
+			lines: []string{
+				`127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`,
+				`127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207 trailing`,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected structured fast matcher")
+			}
+			regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			for _, line := range tc.lines {
+				assertRunParity(t, current, regexpOnly, line, false)
+			}
+		})
+	}
+}
+
+func TestStructuredWhitespaceCharClassMatchesRegexpSpace(t *testing.T) {
+	patterns := CopyDefalutPatterns()
+	patterns["SP"] = `[\s]+`
+	patterns["TAB"] = `[\t]+`
+	patterns["CTRL"] = `[\t-\r]+`
+
+	denorm, errs := DenormalizePatternsFromMap(patterns)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	storage := PatternStorage{denorm}
+
+	cases := []struct {
+		name    string
+		pattern string
+		lines   []string
+	}{
+		{
+			name:    "regexp space",
+			pattern: `%{SP:item}`,
+			lines:   []string{" \t\n\r\f", "\v"},
+		},
+		{
+			name:    "escaped tab",
+			pattern: `%{TAB:item}`,
+			lines:   []string{"\t\t", "tt"},
+		},
+		{
+			name:    "escaped range",
+			pattern: `%{CTRL:item}`,
+			lines:   []string{"\n", "x"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected structured fast matcher")
+			}
+			regexpOnly, err := CompilePattern(tc.pattern, storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			for _, line := range tc.lines {
+				assertRunParity(t, current, regexpOnly, line, false)
+			}
+		})
+	}
+}
+
+func TestStructuredNotSpaceMatchesRegexpSpace(t *testing.T) {
+	current, err := CompilePattern(`%{NOTSPACE:item}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.fastMatcher == nil {
+		t.Fatal("expected structured fast matcher")
+	}
+	regexpOnly, err := CompilePattern(`%{NOTSPACE:item}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regexpOnly.fastMatcher = nil
+
+	for _, line := range []string{"x", "\v", " "} {
+		assertRunParity(t, current, regexpOnly, line, false)
+	}
+}
+
 func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
 	g, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -165,6 +576,70 @@ func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
 	regexpRet, regexpErr := regexpOnly.Run(line, true)
 	assert.Equal(t, regexpErr, fastErr)
 	assert.Equal(t, regexpRet, fastRet)
+}
+
+func TestStructuredFastPathBoundaryGuidance(t *testing.T) {
+	unbounded, err := CompilePattern(`%{DATA:a}%{DATA:b}%{GREEDYDATA:c}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbounded.fastMatcher != nil {
+		t.Fatal("expected adjacent unbounded DATA/GREEDYDATA pattern to fall back to regexp")
+	}
+
+	cases := []struct {
+		name    string
+		pattern string
+		line    string
+		want    map[string]string
+	}{
+		{
+			name:    "literal delimiters",
+			pattern: `a=%{DATA:a} b=%{DATA:b} msg=%{GREEDYDATA:c}`,
+			line:    `a=alpha b=beta msg=hello world`,
+			want: map[string]string{
+				"a": "alpha",
+				"b": "beta",
+				"c": "hello world",
+			},
+		},
+		{
+			name:    "notspace delimiters",
+			pattern: `%{NOTSPACE:a} %{NOTSPACE:b} %{GREEDYDATA:c}`,
+			line:    `alpha beta hello world`,
+			want: map[string]string{
+				"a": "alpha",
+				"b": "beta",
+				"c": "hello world",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.fastMatcher == nil {
+				t.Fatal("expected bounded pattern to use structured fast matcher")
+			}
+
+			regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
+			if err != nil {
+				t.Fatal(err)
+			}
+			regexpOnly.fastMatcher = nil
+
+			fastRet, fastErr := current.Run(tc.line, true)
+			regexpRet, regexpErr := regexpOnly.Run(tc.line, true)
+			assert.Equal(t, regexpErr, fastErr)
+			assert.Equal(t, regexpRet, fastRet)
+			for name, want := range tc.want {
+				assert.Equal(t, want, fastRet[current.nameIndex[name]])
+			}
+		})
+	}
 }
 
 func TestStructuredAnchoredPatternKeepsStartSemantics(t *testing.T) {
@@ -888,6 +1363,9 @@ func TestElasticsearchIndexSlowPattern(t *testing.T) {
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if g.fastMatcher == nil || g.fastMatcher.elasticRunner == nil {
+		t.Fatalf("expected elasticsearch index slow runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
 	}
 
 	line := `[2021-06-01T11:56:19,084][WARN ][i.i.s.index              ] [master] [shopping/X17jbNZ4SoS65zKTU9ZAJg] took[34.1ms], took_millis[34], type[_doc], id[LgC3xXkBLT9WrDT1Dovp], routing[], source[{"price":222,"name":"hello"}]`
