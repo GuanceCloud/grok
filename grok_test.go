@@ -1642,7 +1642,7 @@ func TestStructuredJenkinsFixtureUsesFastMatcher(t *testing.T) {
 	if !fixture.current.fastMatcher.jenkinsRunner.run(dst, fixture.line, true) {
 		t.Fatalf("expected jenkins runner to match line, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 		t.Fatalf("expected jenkins fixture fast matcher to succeed, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
 
@@ -1727,7 +1727,7 @@ func TestStructuredOptionalLiteralPattern(t *testing.T) {
 	assert.Equal(t, "", ret[g.nameIndex["host"]])
 
 	dst := make([]string, len(g.subMatchNames.name))
-	if !g.fastMatcher.match(dst, `[]`, true) {
+	if !g.fastMatcher.match(dst, `[]`, true, nil) {
 		t.Fatal("expected optional literal fast matcher to match empty host")
 	}
 	assert.Equal(t, "", dst[g.nameIndex["host"]])
@@ -1961,7 +1961,7 @@ func TestStructuredRedisFixtureUsesFastMatcher(t *testing.T) {
 		}
 
 		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 			t.Fatal("expected redis fixture fast matcher to succeed")
 		}
 		if fixture.current.fastMatcher.backtracking {
@@ -1994,7 +1994,7 @@ func TestStructuredConsulFixtureUsesFastMatcher(t *testing.T) {
 		}
 
 		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 			t.Fatal("expected consul fixture fast matcher to succeed")
 		}
 
@@ -2160,7 +2160,7 @@ func TestStructuredSolrFixtureUsesFastMatcher(t *testing.T) {
 		}
 
 		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 			t.Fatal("expected solr fixture fast matcher to succeed")
 		}
 
@@ -2188,7 +2188,7 @@ func TestStructuredElasticSearchDefaultFixtureUsesFastMatcher(t *testing.T) {
 	}
 
 	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 		t.Fatal("expected elasticsearch default fixture fast matcher to succeed")
 	}
 
@@ -2208,7 +2208,7 @@ func TestStructuredTomcatCatalinaFixtureUsesFastMatcher(t *testing.T) {
 	}
 
 	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
 		t.Fatalf("expected tomcat catalina fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
@@ -2229,7 +2229,7 @@ func TestStructuredRabbitMQFixtureUsesFastMatcher(t *testing.T) {
 	}
 
 	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
 		t.Fatalf("expected rabbitmq fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
@@ -2254,7 +2254,7 @@ func TestStructuredNginxAccessFixtureUsesFastMatcher(t *testing.T) {
 	}
 
 	dst = make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true) {
+	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
 		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
 		t.Fatalf("expected nginx access fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
 	}
@@ -2302,7 +2302,7 @@ func traceStructuredMatcherFailure(m *structuredMatcher, content string, trimSpa
 			}
 			pos = next
 		case step.submatcher != nil:
-			next, ok := step.submatcher.matchLinearFrom(nil, content, pos, trimSpace)
+			next, ok := step.submatcher.matchLinearFrom(nil, content, pos, trimSpace, nil)
 			if !ok {
 				if step.optional {
 					continue
@@ -2313,7 +2313,7 @@ func traceStructuredMatcherFailure(m *structuredMatcher, content string, trimSpa
 		case len(step.alternatives) > 0:
 			okAny := false
 			for _, alt := range matchingAlternatives(step, content, pos) {
-				next, ok := alt.matchLinearFrom(nil, content, pos, trimSpace)
+				next, ok := alt.matchLinearFrom(nil, content, pos, trimSpace, nil)
 				if ok {
 					pos = next
 					okAny = true
@@ -2909,6 +2909,48 @@ func TestStructuredOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(
 	}
 }
 
+func TestStructuredFastMatcherSkipsAmbiguousIstioAccessPattern(t *testing.T) {
+	pattern := `\[%{TIMESTAMP_ISO8601:start_time}\] "%{GREEDYDATA:http_method} %{GREEDYDATA:http_path} %{GREEDYDATA:protocol}" %{GREEDYDATA:response_code} %{GREEDYDATA:response_flags} %{GREEDYDATA:response_code_details} %{GREEDYDATA:connection_termination_details} "%{GREEDYDATA:upstream_transport_failure_reason}" %{GREEDYDATA:bytes_received} %{GREEDYDATA:bytes_sent} %{GREEDYDATA:duration} %{GREEDYDATA:resp_upstream_service_time} "%{GREEDYDATA:req_x_forwarded_for}" "%{GREEDYDATA:req_user_agent}" "%{GREEDYDATA:req_x_request_id}" "%{GREEDYDATA:req_authority}" "%{GREEDYDATA:upstream_host}" %{GREEDYDATA:upstream_cluster} %{GREEDYDATA:upstream_local_address} %{GREEDYDATA:downstream_local_address} %{GREEDYDATA:downstream_remote_address} %{GREEDYDATA:requested_server_name} %{GREEDYDATA:route_name}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher != nil {
+		t.Fatal("ambiguous all-greedy access pattern should use regexp path")
+	}
+	if g.filter != nil {
+		t.Fatal("ambiguous all-greedy access pattern should skip regexp capture filter")
+	}
+
+	line := `[2026-06-02T23:51:30.123Z] "GET /api/v1/query?x=1 HTTP/1.1" 200 - via_upstream - "-" 0 1234 12000 11 "10.0.0.1" "curl/8.0" "req-1" "example.com" "10.0.0.2:8080" outbound|8080||svc.ns.svc.cluster.local 10.0.0.3:39000 10.0.0.4:8080 10.0.0.5:56789 - default`
+	ret, err := g.Run(line, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "GET", ret[g.nameIndex["http_method"]])
+	assert.Equal(t, "12000", ret[g.nameIndex["duration"]])
+}
+
+func TestStructuredFastMatcherSkipsOptionalGreedyRiskPattern(t *testing.T) {
+	pattern := `%{TIMESTAMP_ISO8601:time} %{GREEDYDATA:msg}, request: "%{GREEDYDATA:method} %{GREEDYDATA:path} HTTP/%{NUMBER:http_version}", (upstream: "%{GREEDYDATA:upstream}", )?host: "%{NOTSPACE:host}"`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher != nil {
+		t.Fatal("optional multi-greedy pattern should use regexp path")
+	}
+
+	line := `2026-06-02T23:51:30.123Z upstream timed out, request: "GET /api/v1/query HTTP/1.1", upstream: "10.0.0.2:8080", host: "example.com"`
+	ret, err := g.Run(line, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "GET", ret[g.nameIndex["method"]])
+	assert.Equal(t, "/api/v1/query", ret[g.nameIndex["path"]])
+	assert.Equal(t, "example.com", ret[g.nameIndex["host"]])
+}
+
 func TestRunToReuseBuffer(t *testing.T) {
 	g, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -2934,6 +2976,87 @@ func TestRunToReuseBuffer(t *testing.T) {
 
 	if cap(ret) != cap(buf) {
 		t.Fatalf("buffer was not reused")
+	}
+}
+
+func TestRunWithMetaReportsFastPath(t *testing.T) {
+	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected fast matcher")
+	}
+
+	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
+	var meta RunMeta
+	ret, err := g.RunWithMeta(line, true, &meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "127.0.0.1", ret[g.nameIndex["client_ip"]])
+	assert.Equal(t, RunPathFastPath, meta.Path)
+	assert.Equal(t, FallbackNone, meta.FallbackReason)
+	assert.Equal(t, g.PatternHash(), meta.PatternHash)
+	assert.Greater(t, meta.WorkUnits, 0)
+}
+
+func TestRunWithMetaReportsFastPathDisabled(t *testing.T) {
+	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.DisableFastPath()
+
+	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
+	var meta RunMeta
+	ret, err := g.RunWithMeta(line, true, &meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "GET", ret[g.nameIndex["http_method"]])
+	assert.Equal(t, RunPathRegexp, meta.Path)
+	assert.Equal(t, FallbackFastPathDisabled, meta.FallbackReason)
+}
+
+func TestFastPathBudgetExceededDisablesAfterThreshold(t *testing.T) {
+	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.FastPathDisabled() {
+		t.Fatal("fast path should start enabled")
+	}
+
+	for i := 0; i < fastPathBudgetDisableThreshold; i++ {
+		g.noteFastPathBudgetExceeded()
+	}
+	if !g.FastPathDisabled() {
+		t.Fatal("fast path should be disabled after repeated budget excess")
+	}
+}
+
+func TestStructuredFastPathBudgetExceeded(t *testing.T) {
+	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected fast matcher")
+	}
+
+	dst := make([]string, g.MatchCount())
+	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
+	budget := matchBudget{remain: 0}
+	if g.fastMatcher.match(dst, line, true, &budget) {
+		t.Fatal("fast matcher should not complete with zero budget")
+	}
+	if !budget.exceeded {
+		t.Fatal("expected budget to be marked exceeded")
 	}
 }
 
@@ -3652,6 +3775,31 @@ func BenchmarkRunStructuredNginxAccessRegexpPath(b *testing.B) {
 	g.fastMatcher = nil
 
 	line := `127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		ret, runErr := g.Run(line, true)
+		if runErr != nil {
+			b.Fatal(runErr)
+		}
+		if len(ret) == 0 {
+			b.Fatal("empty result")
+		}
+	}
+}
+
+func BenchmarkRunAmbiguousIstioAccessRegexpFallback(b *testing.B) {
+	pattern := `\[%{TIMESTAMP_ISO8601:start_time}\] "%{GREEDYDATA:http_method} %{GREEDYDATA:http_path} %{GREEDYDATA:protocol}" %{GREEDYDATA:response_code} %{GREEDYDATA:response_flags} %{GREEDYDATA:response_code_details} %{GREEDYDATA:connection_termination_details} "%{GREEDYDATA:upstream_transport_failure_reason}" %{GREEDYDATA:bytes_received} %{GREEDYDATA:bytes_sent} %{GREEDYDATA:duration} %{GREEDYDATA:resp_upstream_service_time} "%{GREEDYDATA:req_x_forwarded_for}" "%{GREEDYDATA:req_user_agent}" "%{GREEDYDATA:req_x_request_id}" "%{GREEDYDATA:req_authority}" "%{GREEDYDATA:upstream_host}" %{GREEDYDATA:upstream_cluster} %{GREEDYDATA:upstream_local_address} %{GREEDYDATA:downstream_local_address} %{GREEDYDATA:downstream_remote_address} %{GREEDYDATA:requested_server_name} %{GREEDYDATA:route_name}`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		b.Fatal(err)
+	}
+	if g.fastMatcher != nil {
+		b.Fatal("ambiguous all-greedy access pattern should use regexp path")
+	}
+
+	line := `[2026-06-02T23:51:30.123Z] "GET /api/v1/query?x=1 HTTP/1.1" 200 - via_upstream - "-" 0 1234 12000 11 "10.0.0.1" "curl/8.0" "req-1" "example.com" "10.0.0.2:8080" outbound|8080||svc.ns.svc.cluster.local 10.0.0.3:39000 10.0.0.4:8080 10.0.0.5:56789 - default`
+	b.ReportAllocs()
 	b.ResetTimer()
 
 	for n := 0; n < b.N; n++ {
