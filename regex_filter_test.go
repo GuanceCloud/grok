@@ -29,6 +29,16 @@ func TestRegexpFilterDisabledForLowCapturePattern(t *testing.T) {
 	}
 }
 
+func TestRegexpFilterDisabledForManyUnboundedCaptures(t *testing.T) {
+	g, err := CompilePattern(`\[%{TIMESTAMP_ISO8601:start_time}\] "%{GREEDYDATA:http_method} %{GREEDYDATA:http_path} %{GREEDYDATA:protocol}" %{GREEDYDATA:response_code} %{GREEDYDATA:response_flags} %{GREEDYDATA:response_code_details} %{GREEDYDATA:connection_termination_details} "%{GREEDYDATA:upstream_transport_failure_reason}" %{GREEDYDATA:bytes_received} %{GREEDYDATA:bytes_sent} %{GREEDYDATA:duration} %{GREEDYDATA:resp_upstream_service_time} "%{GREEDYDATA:req_x_forwarded_for}" "%{GREEDYDATA:req_user_agent}" "%{GREEDYDATA:req_x_request_id}" "%{GREEDYDATA:req_authority}" "%{GREEDYDATA:upstream_host}" %{GREEDYDATA:upstream_cluster} %{GREEDYDATA:upstream_local_address} %{GREEDYDATA:downstream_local_address} %{GREEDYDATA:downstream_remote_address} %{GREEDYDATA:requested_server_name} %{GREEDYDATA:route_name}`, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.filter != nil {
+		t.Fatalf("expected regexp filter to be disabled for many unbounded captures, got %q", g.filter.expr)
+	}
+}
+
 func TestRegexpFilterPreservesFallbackSemantics(t *testing.T) {
 	expr := `^prefix=(?P<a>[A-Z]+) code=(?P<b>[0-9]+) region=(?P<c>[a-z]+) trace=(?P<d>[a-z0-9-]+) status=(?P<e>ok|warn)$`
 
