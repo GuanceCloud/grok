@@ -3021,7 +3021,7 @@ func TestRunWithMetaReportsFastPathDisabled(t *testing.T) {
 	assert.Equal(t, FallbackFastPathDisabled, meta.FallbackReason)
 }
 
-func TestFastPathBudgetExceededDisablesAfterThreshold(t *testing.T) {
+func TestFastPathBudgetExceededDoesNotDisableMatcher(t *testing.T) {
 	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -3031,11 +3031,28 @@ func TestFastPathBudgetExceededDisablesAfterThreshold(t *testing.T) {
 		t.Fatal("fast path should start enabled")
 	}
 
-	for i := 0; i < fastPathBudgetDisableThreshold; i++ {
-		g.noteFastPathBudgetExceeded()
+	dst := make([]string, g.MatchCount())
+	budget := matchBudget{remain: 0}
+	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
+	if g.fastMatcher.match(dst, line, true, &budget) {
+		t.Fatal("fast matcher should not complete with zero budget")
 	}
-	if !g.FastPathDisabled() {
-		t.Fatal("fast path should be disabled after repeated budget excess")
+	if !budget.exceeded {
+		t.Fatal("expected budget to be marked exceeded")
+	}
+	if g.FastPathDisabled() {
+		t.Fatal("budget excess should not disable fast path for future runs")
+	}
+
+	var meta RunMeta
+	ret, err := g.RunWithMeta(line, true, &meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "127.0.0.1", ret[g.nameIndex["client_ip"]])
+	assert.Equal(t, RunPathFastPath, meta.Path)
+	if g.FastPathDisabled() {
+		t.Fatal("successful fast path should remain enabled")
 	}
 }
 
@@ -3057,6 +3074,35 @@ func TestStructuredFastPathBudgetExceeded(t *testing.T) {
 	}
 	if !budget.exceeded {
 		t.Fatal("expected budget to be marked exceeded")
+	}
+}
+
+func TestStructuredMatchBudgetIsCapped(t *testing.T) {
+	budget := newStructuredMatchBudget(structuredBudgetMax, 1024)
+	if budget.remain != structuredBudgetMax {
+		t.Fatalf("expected capped budget %d, got %d", structuredBudgetMax, budget.remain)
+	}
+}
+
+func TestStructuredBacktrackingScanConsumesInputBudget(t *testing.T) {
+	pattern := `%{GREEDYDATA:first} X %{GREEDYDATA:second} Y`
+	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.fastMatcher == nil {
+		t.Fatal("expected fast matcher")
+	}
+	if !g.fastMatcher.backtracking {
+		t.Fatal("expected backtracking matcher")
+	}
+
+	line := strings.Repeat("part X ", 512) + "tail Z"
+	dst := make([]string, g.MatchCount())
+	budget := matchBudget{remain: scanWorkUnits(len(line)) / 2}
+	g.fastMatcher.match(dst, line, true, &budget)
+	if !budget.exceeded {
+		t.Fatal("expected backtracking scan to consume input budget")
 	}
 }
 
