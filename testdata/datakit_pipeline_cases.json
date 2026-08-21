@@ -1,0 +1,248 @@
+[
+  {
+    "collector": "apache",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/apache",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/apache/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/apache/input.go",
+    "pipelines": {
+      "apache": "\n# access log\ngrok(_,\"%{GREEDYDATA:ip_or_host} - - \\\\[%{HTTPDATE:time}\\\\] \\\"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\" %{NUMBER:http_code} \")\ngrok(_,\"%{GREEDYDATA:ip_or_host} - - \\\\[%{HTTPDATE:time}\\\\] \\\"-\\\" %{NUMBER:http_code} \")\ndefault_time(time)\ncast(http_code,\"int\")\n\n# error log\ngrok(_,\"\\\\[%{HTTPDERROR_DATE:time}\\\\] \\\\[%{GREEDYDATA:type}:%{GREEDYDATA:status}\\\\] \\\\[pid %{GREEDYDATA:pid}:tid %{GREEDYDATA:tid}\\\\] \")\ngrok(_,\"\\\\[%{HTTPDERROR_DATE:time}\\\\] \\\\[%{GREEDYDATA:type}:%{GREEDYDATA:status}\\\\] \\\\[pid %{INT:pid}\\\\] \")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "apache": {
+        "Apache access log": "127.0.0.1 - - [17/May/2021:14:51:09 +0800] \"GET /server-status?auto HTTP/1.1\" 200 917",
+        "Apache error log": "[Tue May 19 18:39:45.272121 2021] [access_compat:error] [pid 9802] [client ::1:50547] AH01797: client denied by server configuration: /Library/WebServer/Documents/server-status"
+      }
+    }
+  },
+  {
+    "collector": "consul",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/consul",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/consul/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/consul/input.go",
+    "pipelines": {
+      "consul": "\nadd_pattern(\"_clog_date\", \"%{YEAR}-%{MONTHNUM}-%{MONTHDAY}T%{HOUR}:%{MINUTE}:%{SECOND}%{INT}\")\nadd_pattern(\"_clog_level\", \"(DEBUG|INFO|WARN|ERROR|FATAL)\")\nadd_pattern(\"_clog_character\", \"%{NOTSPACE}\")\nadd_pattern(\"_clog_message\", \"%{GREEDYDATA}\")\ngrok(_, '%{SYSLOGTIMESTAMP}%{SPACE}%{SYSLOGHOST}%{SPACE}consul\\\\[%{POSINT}\\\\]:%{SPACE}%{_clog_date:date}%{SPACE}\\\\[%{_clog_level:level}\\\\]%{SPACE}%{_clog_character:character}:%{SPACE}%{_clog_message:msg}')\ndrop_origin_data()\n"
+    },
+    "examples": {
+      "consul": {
+        "Consul log": "Sep 18 19:30:23 derrick-ThinkPad-X230 consul[11803]: 2021-09-18T19:30:23.522+0800 [INFO]  agent.server.connect: initialized primary datacenter CA with provider: provider=consul"
+      }
+    }
+  },
+  {
+    "collector": "dameng",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/dameng",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/dameng/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/dameng/input.go",
+    "pipelines": {
+      "dameng": "\nadd_pattern(\"log_date\", \"%{YEAR}-%{MONTHNUM}-%{MONTHDAY}%{SPACE}%{HOUR}:%{MINUTE}:%{SECOND}\")\nadd_pattern(\"status\", \"(ERROR|FATAL|WARNING|INFO)\")\n# default\ngrok(_, \"%{log_date:time}%{SPACE}\\\\[%{status:status}\\\\]\\\\s+%{GREEDYDATA:msg}\")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "dameng": {
+        "dameng log": "2025-06-23 10:04:27.793 [INFO] dminit P0000008230 T0000000000000008230  INI parameter RECYCLE_POOLS changed, the original value 0, new value 1\n\n\t\t\t"
+      }
+    }
+  },
+  {
+    "collector": "elasticsearch",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/elasticsearch",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/elasticsearch/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/elasticsearch/input.go",
+    "pipelines": {
+      "elasticsearch": "\n# Elasticsearch_search_query\ngrok(_, \"^\\\\[%{TIMESTAMP_ISO8601:time}\\\\]\\\\[%{LOGLEVEL:status}%{SPACE}\\\\]\\\\[i.s.s.(query|fetch)%{SPACE}\\\\] (\\\\[%{HOSTNAME:nodeId}\\\\] )?\\\\[%{NOTSPACE:index}\\\\]\\\\[%{INT}\\\\] took\\\\[.*\\\\], took_millis\\\\[%{INT:duration}\\\\].*\")\n\n# Elasticsearch_slow_indexing\ngrok(_, \"^\\\\[%{TIMESTAMP_ISO8601:time}\\\\]\\\\[%{LOGLEVEL:status}%{SPACE}\\\\]\\\\[i.i.s.index%{SPACE}\\\\] (\\\\[%{HOSTNAME:nodeId}\\\\] )?\\\\[%{NOTSPACE:index}/%{NOTSPACE}\\\\] took\\\\[.*\\\\], took_millis\\\\[%{INT:duration}\\\\].*\")\n\n# Elasticsearch_default\ngrok(_, \"^\\\\[%{TIMESTAMP_ISO8601:time}\\\\]\\\\[%{LOGLEVEL:status}%{SPACE}\\\\]\\\\[%{NOTSPACE:name}%{SPACE}\\\\]%{SPACE}(\\\\[%{HOSTNAME:nodeId}\\\\])?.*\")\n\ncast(shard, \"int\")\ncast(duration, \"int\")\n\nduration_precision(duration, \"ms\", \"ns\")\n\nnullif(nodeId, \"\")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "elasticsearch": {
+        "ElasticSearch index slow log": "[2021-06-01T11:56:19,084][WARN ][i.i.s.index              ] [master] [shopping/X17jbNZ4SoS65zKTU9ZAJg] took[34.1ms], took_millis[34], type[_doc], id[LgC3xXkBLT9WrDT1Dovp], routing[], source[{\"price\":222,\"name\":\"hello\"}]",
+        "ElasticSearch log": "[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [master] high disk watermark [90%] exceeded on [A2kEFgMLQ1-vhMdZMJV3Iw][master][/tmp/elasticsearch-cluster/nodes/0] free: 17.1gb[7.3%], shards will be relocated away from this node; currently relocating away shards totalling [0] bytes; the node is expected to continue to exceed the high disk watermark when these relocations are complete",
+        "ElasticSearch search slow log": "[2021-06-01T11:56:06,712][WARN ][i.s.s.query              ] [master] [shopping][0] took[36.3ms], took_millis[36], total_hits[5 hits], types[], stats[], search_type[QUERY_THEN_FETCH], total_shards[1], source[{\"query\":{\"match\":{\"name\":{\"query\":\"Nariko\",\"operator\":\"OR\",\"prefix_length\":0,\"max_expansions\":50,\"fuzzy_transpositions\":true,\"lenient\":false,\"zero_terms_query\":\"NONE\",\"auto_generate_synonyms_phrase_query\":true,\"boost\":1.0}}},\"sort\":[{\"price\":{\"order\":\"desc\"}}]}], id[],"
+      }
+    }
+  },
+  {
+    "collector": "jenkins",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/jenkins",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/jenkins/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/jenkins/input.go",
+    "pipelines": {
+      "jenkins": "\ngrok(_, \"%{TIMESTAMP_ISO8601:time} \\\\[id=%{GREEDYDATA:id}\\\\]\\t%{GREEDYDATA:status}\\t\")\ndefault_time(time)\ngroup_in(status, [\"WARNING\", \"NOTICE\"], \"warning\")\ngroup_in(status, [\"SEVERE\", \"ERROR\"], \"error\")\ngroup_in(status, [\"INFO\"], \"info\")\n\n"
+    },
+    "examples": {
+      "jenkins": {
+        "Jenkins log": "2021-05-18 03:08:58.053+0000 [id=32]\tINFO\tjenkins.InitReactorRunner$1#onAttained: Started all plugins"
+      }
+    }
+  },
+  {
+    "collector": "kafka",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kafka",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kafka/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kafka/input.go",
+    "pipelines": {
+      "kafka": "\ngrok(_, \"%{DATA:time} \\\\[%{WORD:thread_name}\\\\] %{WORD:status}  %{WORD:name} - %{GREEDYDATA:msg}\")\n\n\ngrok(_, \"^%{INT:duration} \\\\[%{WORD:thread_name}\\\\] %{LOGLEVEL:status} %{GREEDYDATA:name} - %{GREEDYDATA:msg}\")\n\nadd_pattern(\"date\", \"%{INT}-%{INT}-%{INT} %{INT}:%{INT}:%{INT}\")\ngrok(_, \"^%{date:time} %{LOGLEVEL:status} %{DATA:name}:%{INT:line} - %{GREEDYDATA:msg}\")\n\n\nadd_pattern(\"date1\", \"%{INT}-%{INT}-%{INT} %{INT}:%{INT}:%{INT},%{INT}\")\ngrok(_, \"^\\\\[%{date1:time}\\\\] %{WORD:status} %{DATA:msg} \\\\(%{DATA:name}\\\\)\")\n\ndefault_time(time)\n"
+    },
+    "examples": {
+      "kafka": {
+        "Kafka log": "[2020-07-07 15:04:29,333] DEBUG Progress event: HTTP_REQUEST_COMPLETED_EVENT, bytes: 0 (io.confluent.connect.s3.storage.S3OutputStream:286)"
+      }
+    }
+  },
+  {
+    "collector": "kingbase",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kingbase",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kingbase/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/kingbase/input.go",
+    "pipelines": {
+      "kingbase": "\nadd_pattern(\"log_date\", \"%{YEAR}-%{MONTHNUM}-%{MONTHDAY}%{SPACE}%{HOUR}:%{MINUTE}:%{SECOND}%{SPACE}(?:CST|UTC)\")\nadd_pattern(\"status\", \"(LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO)\")\n# default\ngrok(_, \"%{log_date:time}%{SPACE}\\\\[%{INT:process_id}\\\\]%{SPACE}%{status:status}:\\\\s+%{GREEDYDATA:msg}\")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "kingbase": {
+        "Kingbase log": "2025-06-17 13:07:10.952 UTC [999] ERROR:  relation \"sys_stat_activity\" does not exist at character 240\n\t\t\t"
+      }
+    }
+  },
+  {
+    "collector": "mongodb",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mongodb",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mongodb/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mongodb/input.go",
+    "pipelines": {
+      "mongodb": "\n  json(_, t, \"tmp\")\n  json(tmp, `$date`, \"time\")\n  json(_, s, \"status\")\n  json(_, c, \"component\")\n  json(_, msg, \"msg\")\n  json(_, ctx, \"context\")\n  drop_key(tmp)\n  default_time(time)\n"
+    },
+    "examples": {
+      "mongodb": {
+        "MongoDB log": "{\"t\":{\"$date\":\"2021-06-03T09:12:19.977+00:00\"},\"s\":\"I\", \"c\":\"STORAGE\", \"id\":22430, \"ctx\":\"WTCheckpointThread\",\"msg\":\"WiredTiger message\",\"attr\":{\"message\":\"[1622711539:977142][1:0x7f1b9f159700], WT_SESSION.checkpoint: [WT_VERB_CHECKPOINT_PROGRESS] saving checkpoint snapshot min: 653, snapshot max: 653 snapshot count: 0, oldest timestamp: (0, 0) , meta checkpoint timestamp: (0, 0)\"}}"
+      }
+    }
+  },
+  {
+    "collector": "mysql",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mysql",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mysql/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/mysql/input.go",
+    "pipelines": {
+      "mysql": "\ngrok(_, \"%{TIMESTAMP_ISO8601:time}\\\\s+%{INT:thread_id}\\\\s+%{WORD:operation}\\\\s+%{GREEDYDATA:raw_query}\")\ngrok(_, \"%{TIMESTAMP_ISO8601:time} %{INT:thread_id} \\\\[%{NOTSPACE:status}\\\\] %{GREEDYDATA:msg}\")\n\nadd_pattern(\"date2\", \"%{YEAR}%{MONTHNUM2}%{MONTHDAY} %{TIME}\")\ngrok(_, \"%{date2:time} \\\\s+(InnoDB:|\\\\[%{NOTSPACE:status}\\\\])\\\\s+%{GREEDYDATA:msg}\")\n\nadd_pattern(\"timeline\", \"# Time: %{TIMESTAMP_ISO8601:time}\")\nadd_pattern(\"userline\", \"# User@Host: %{NOTSPACE:db_user}\\\\s+@\\\\s(%{NOTSPACE:db_host})?(\\\\s+)?\\\\[(%{NOTSPACE:db_ip})?\\\\](\\\\s+Id:\\\\s+%{INT:query_id})?\")\nadd_pattern(\"kvline01\", \"# Query_time: %{NUMBER:query_time}\\\\s+Lock_time: %{NUMBER:lock_time}\\\\s+Rows_sent: %{INT:rows_sent}\\\\s+Rows_examined: %{INT:rows_examined}\")\n\nadd_pattern(\"kvline02\", \"# Thread_id: %{INT:thread_id}\\\\s+Killed: %{INT:killed}\\\\s+Errno: %{INT:errno}\")\nadd_pattern(\"kvline03\", \"# Bytes_sent: %{INT:bytes_sent}\\\\s+Bytes_received: %{INT:bytes_received}\")\n\n# multi-line SQLs\nadd_pattern(\"sqls\", \"(?s)(.*)\")\n\ngrok(_, \"%{timeline}\\\\n%{userline}\\\\n%{kvline01}(\\\\n)?(%{kvline02})?(\\\\n)?(%{kvline03})?\\\\n%{sqls:db_slow_statement}\")\n\ncast(thread_id, \"int\")\ncast(query_id, \"int\")\ncast(rows_sent, \"int\")\ncast(rows_examined, \"int\")\n\ncast(bytes_sent, \"int\")\ncast(bytes_received, \"int\")\ncast(killed, \"int\")\ncast(errno, \"int\")\ncast(query_timestamp, \"int\")\ncast(query_time, \"float\")\ncast(lock_time, \"float\")\n\nnullif(thread_id, 0)\nnullif(db_host, \"\")\nnullif(killed, 0)\nnullif(bytes_sent, 0)\nnullif(bytes_received, 0)\nnullif(errno, 0)\n\ndefault_time(time)\n"
+    },
+    "examples": {
+      "mysql": {
+        "MySQL log": "2017-12-29T12:33:33.095243Z         2 Query     SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE CREATE_OPTIONS LIKE '%partitioned%';",
+        "MySQL slow log": "# Time: 2019-11-27T10:43:13.460744Z\n# User@Host: root[root] @ localhost [1.2.3.4]  Id:    35\n# Query_time: 0.214922  Lock_time: 0.000184 Rows_sent: 248832  Rows_examined: 72\n# Thread_id: 55   Killed: 0  Errno: 0\n# Bytes_sent: 123456   Bytes_received: 0\nSET timestamp=1574851393;\nSELECT * FROM fruit f1, fruit f2, fruit f3, fruit f4, fruit f5"
+      }
+    }
+  },
+  {
+    "collector": "nginx",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/nginx",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/nginx/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/nginx/input.go",
+    "pipelines": {
+      "nginx": "\nadd_pattern(\"date2\", \"%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}\")\n\n# access log\ngrok(_, \"%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \\\\[%{HTTPDATE:time}\\\\] \\\"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\" %{INT:status_code} %{INT:bytes}\")\n\n# access log\nadd_pattern(\"access_common\", \"%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \\\\[%{HTTPDATE:time}\\\\] \\\"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\" %{INT:status_code} %{INT:bytes}\")\ngrok(_, '%{access_common} \"%{NOTSPACE:referrer}\" \"%{GREEDYDATA:agent}\"')\nuser_agent(agent)\n\n# error log\ngrok(_, \"%{date2:time} \\\\[%{LOGLEVEL:status}\\\\] %{GREEDYDATA:msg}, client: %{NOTSPACE:client_ip}, server: %{NOTSPACE:server}, request: \\\"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\", (upstream: \\\"%{GREEDYDATA:upstream}\\\", )?host: \\\"%{NOTSPACE:ip_or_host}\\\"\")\ngrok(_, \"%{date2:time} \\\\[%{LOGLEVEL:status}\\\\] %{GREEDYDATA:msg}, client: %{NOTSPACE:client_ip}, server: %{NOTSPACE:server}, request: \\\"%{GREEDYDATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\", host: \\\"%{NOTSPACE:ip_or_host}\\\"\")\ngrok(_,\"%{date2:time} \\\\[%{LOGLEVEL:status}\\\\] %{GREEDYDATA:msg}\")\n\ngroup_in(status, [\"warn\", \"notice\"], \"warning\")\ngroup_in(status, [\"error\", \"crit\", \"alert\", \"emerg\"], \"error\")\n\ncast(status_code, \"int\")\ncast(bytes, \"int\")\n\ngroup_between(status_code, [200,299], \"OK\", status)\ngroup_between(status_code, [300,399], \"notice\", status)\ngroup_between(status_code, [400,499], \"warning\", status)\ngroup_between(status_code, [500,599], \"error\", status)\n\n\nnullif(http_ident, \"-\")\nnullif(http_auth, \"-\")\nnullif(upstream, \"\")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "nginx": {
+        "Nginx access log": "127.0.0.1 - - [24/Mar/2021:13:54:19 +0800] \"GET /basic_status HTTP/1.1\" 200 97 \"-\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 11_1_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Safari/537.36\"",
+        "Nginx error log1": "2021/04/21 09:24:04 [alert] 7#7: *168 write() to \"/var/log/nginx/access.log\" failed (28: No space left on device) while logging request, client: 120.204.196.129, server: localhost, request: \"GET / HTTP/1.1\", host: \"47.98.103.73\"",
+        "Nginx error log2": "2021/04/29 16:24:38 [emerg] 50102#0: unexpected \";\" in /usr/local/etc/nginx/nginx.conf:23"
+      }
+    }
+  },
+  {
+    "collector": "postgresql",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/postgresql",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/postgresql/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/postgresql/input.go",
+    "pipelines": {
+      "postgresql": "\nadd_pattern(\"log_date\", \"%{YEAR}-%{MONTHNUM}-%{MONTHDAY}%{SPACE}%{HOUR}:%{MINUTE}:%{SECOND}%{SPACE}(?:CST|UTC)\")\nadd_pattern(\"status\", \"(LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO)\")\nadd_pattern(\"session_id\", \"([.0-9a-z]*)\")\nadd_pattern(\"application_name\", \"(\\\\[%{GREEDYDATA:application_name}?\\\\])\")\nadd_pattern(\"remote_host\", \"(\\\\[\\\\[?%{HOST:remote_host}?\\\\]?\\\\])\")\ngrok(_, \"%{log_date:time}%{SPACE}\\\\[%{INT:process_id}\\\\]%{SPACE}(%{WORD:db_name}?%{SPACE}%{application_name}%{SPACE}%{USER:user}?%{SPACE}%{remote_host}%{SPACE})?%{session_id:session_id}%{SPACE}(%{status:status}:)?\")\n\n# default\ngrok(_, \"%{log_date:time}%{SPACE}\\\\[%{INT:process_id}\\\\]%{SPACE}%{status:status}\")\n\nnullif(remote_host, \"\")\nnullif(session_id, \"\")\nnullif(application_name, \"\")\nnullif(user, \"\")\nnullif(db_name, \"\")\n\ngroup_in(status, [\"\"], \"INFO\")\n\ndefault_time(time)\n"
+    },
+    "examples": {
+      "postgresql": {
+        "PostgreSQL log": "2021-05-31 15:23:45.110 CST [74305] test [pgAdmin 4 - DB:postgres] postgres [127.0.0.1] 60b48f01.12241 LOG: statement: \t\tSELECT psd.*, 2^31 - age(datfrozenxid) as wraparound, pg_database_size(psd.datname) as pg_database_size \t\tFROM pg_stat_database psd \t\tJOIN pg_database pd ON psd.datname = pd.datname \t\tWHERE psd.datname not ilike 'template%' AND psd.datname not ilike 'rdsadmin' \t\tAND psd.datname not ilike 'azure_maintenance' AND psd.datname not ilike 'postgres'"
+      }
+    }
+  },
+  {
+    "collector": "rabbitmq",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/rabbitmq",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/rabbitmq/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/rabbitmq/input.go",
+    "pipelines": {
+      "rabbitmq": "\ngrok(_, \"%{LOGLEVEL:status}%{DATA}====%{SPACE}%{DATA:time}%{SPACE}===%{SPACE}%{GREEDYDATA:msg}\")\n\ngrok(_, \"%{DATA:time} \\\\[%{LOGLEVEL:status}\\\\] %{GREEDYDATA:msg}\")\n\ndefault_time(time)\n"
+    },
+    "examples": {
+      "rabbitmq": {
+        "RabbitMQ log": "2021-05-26 14:20:06.105 [warning] \u003c0.12897.46\u003e rabbitmqctl node_health_check and its HTTP API counterpart are DEPRECATED. See https://www.rabbitmq.com/monitoring.html#health-checks for replacement options."
+      }
+    }
+  },
+  {
+    "collector": "redis",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/redis",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/redis/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/redis/input.go",
+    "pipelines": {
+      "redis": "\nadd_pattern(\"date2\", \"%{MONTHDAY} %{MONTH} %{YEAR}?%{TIME}\")\n\ngrok(_, \"%{INT:pid}:%{WORD:role} %{date2:time} %{NOTSPACE:serverity} %{GREEDYDATA:msg}\")\n\ngroup_in(serverity, [\".\"], \"debug\", status)\ngroup_in(serverity, [\"-\"], \"verbose\", status)\ngroup_in(serverity, [\"*\"], \"notice\", status)\ngroup_in(serverity, [\"#\"], \"warning\", status)\n\ncast(pid, \"int\")\ndefault_time(time)\n"
+    },
+    "examples": {
+      "redis": {
+        "Redis log": "122:M 14 May 2019 19:11:40.164 * Background saving terminated with success"
+      }
+    }
+  },
+  {
+    "collector": "solr",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/solr",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/solr/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/solr/input.go",
+    "pipelines": {
+      "solr": "\nadd_pattern(\"solrReporter\",\"(?:[.\\\\w\\\\d]+)\")\nadd_pattern(\"solrParams\", \"(?:[A-Za-z0-9$.+!*'|(){},~@#%\u0026/=:;_?\\\\-\\\\[\\\\]\u003c\u003e]*)\")\nadd_pattern(\"solrPath\", \"(?:%{PATH}|null)\")\ngrok(_,\"%{TIMESTAMP_ISO8601:time}%{SPACE}%{LOGLEVEL:status}%{SPACE}\\\\(%{NOTSPACE:thread}\\\\)%{SPACE}\\\\[%{SPACE}%{NOTSPACE}?\\\\]%{SPACE}%{solrReporter:reporter}%{SPACE}\\\\[%{NOTSPACE:core}\\\\]%{SPACE}webapp=%{NOTSPACE:webapp}%{SPACE}path=%{solrPath:path}%{SPACE}params=\\\\{%{solrParams:params}\\\\}(?:%{SPACE}hits=%{NUMBER:hits})?%{SPACE}status=%{NUMBER:qstatus}%{SPACE}QTime=%{NUMBER:qtime}\")\ngrok(_,\"%{TIMESTAMP_ISO8601:time}%{SPACE}%{LOGLEVEL:status}%{SPACE}\\\\(%{NOTSPACE:thread}\\\\)%{SPACE}\\\\[%{SPACE}%{NOTSPACE}?\\\\]%{SPACE}%{solrReporter:reporter}.*\")\ndefault_time(time,\"UTC\")\n"
+    },
+    "examples": {
+      "solr": {
+        "Solr log": "2013-10-01 12:33:08.319 INFO (org.apache.solr.core.SolrCore) [collection1] webapp.reporter"
+      }
+    }
+  },
+  {
+    "collector": "sqlserver",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/sqlserver",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/sqlserver/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/sqlserver/input.go",
+    "pipelines": {
+      "sqlserver": "\ngrok(_,\"%{TIMESTAMP_ISO8601:time} %{NOTSPACE:origin}\\\\s+%{GREEDYDATA:msg}\")\ndefault_time(time, \"+0\")\n"
+    },
+    "examples": {
+      "sqlserver": {
+        "SQLServer log": "2021-05-28 10:46:07.78 spid10s     0 transactions rolled back in database 'msdb' (4:0). This is an informational message only. No user action is required"
+      }
+    }
+  },
+  {
+    "collector": "tdengine",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tdengine",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tdengine/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tdengine/input.go",
+    "pipelines": {
+      "tdengine": "\ngrok(_, '%{GREEDYDATA:temp}%{SPACE}TAOS_%{NOTSPACE:module}%{SPACE}%{NOTSPACE:level}%{SPACE}%{GREEDYDATA:http_url}')\n\nif level != 'error' {\n  grok(http_url,'\"\\\\|%{SPACE}%{NOTSPACE:code}%{SPACE}\\\\|%{SPACE}%{NOTSPACE:cost_time}%{SPACE}\\\\|%{SPACE}%{NOTSPACE:client_ip}%{SPACE}\\\\|%{SPACE}%{NOTSPACE:method}%{SPACE}\\\\|%{SPACE}%{NOTSPACE:uri}%{SPACE}\"')\n  parse_duration(cost_time)\n\n  duration_precision(cost_time, \"ns\", \"ms\")\n\n}\ngroup_in(level, [\"error\", \"panic\", \"dpanic\", \"fatal\",\"err\",\"fat\"], \"error\", status)\ngroup_in(level, [\"info\", \"debug\", \"inf\", \"bug\"], \"info\", status)\ngroup_in(level, [\"warn\", \"war\"], \"warning\", status)\n\n"
+    },
+    "examples": {
+      "tdengine": {
+        "tdengine log 200": "08/22 13:44:41.108850 01081508 TAOS_ADAPTER info \"| 200 |     2.45708ms |     172.16.5.29 | POST | /rest/sqlutc \" model=web sessionID=48848",
+        "tdengine log 204": "08/22 13:44:34.290731 01081508 TAOS_ADAPTER info \"| 204 |    1.641678ms |     172.16.5.29 | POST | /influxdb/v1/write?db=biz_ufssescxoxnuyzeypouezr_7d \" model=web sessionID=48847"
+      }
+    }
+  },
+  {
+    "collector": "tomcat",
+    "package_dir": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tomcat",
+    "pipeline_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tomcat/input.go",
+    "example_source": "/home/vircoys/go/src/gitlab.jiagouyun.com/cloudcare-tools/datakit/internal/plugins/inputs/tomcat/input.go",
+    "pipelines": {
+      "tomcat": "\n# juli OneLineFormatter format\n# catiline / host-manager / localhost / manager log\nadd_pattern(\"olf_time\", \"%{MONTHDAY}-%{MONTH}-%{YEAR} %{TIME}\")\ngrok(_, \"%{olf_time:time} %{LOGLEVEL:status} \\\\[%{NOTSPACE:thread_name}\\\\] %{NOTSPACE:report_source} %{GREEDYDATA:msg}\")\n\n# localhost_access_log log\ngrok(_, \"%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \\\\[%{HTTPDATE:time}\\\\] \\\"%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}\\\" %{INT:status_code} %{INT:bytes}\")\n\ncast(status_code, \"int\")\ncast(bytes, \"int\")\ngroup_between(status_code, [200,299], \"OK\", status)\ngroup_between(status_code, [300,399], \"notice\", status)\ngroup_between(status_code, [400,499], \"warning\", status)\ngroup_between(status_code, [500,599], \"error\", status)\n\nnullif(http_ident, \"-\")\nnullif(http_auth, \"-\")\n\ndefault_time(time)\n"
+    },
+    "examples": {
+      "tomcat": {
+        "Tomcat Catalina log": "06-Sep-2021 22:33:30.513 INFO [main] org.apache.catalina.startup.VersionLoggerListener.log Command line argument: -Xmx256m",
+        "Tomcat access log": "0:0:0:0:0:0:0:1 - admin [24/Feb/2015:15:57:10 +0530] \"GET /manager/images/tomcat.gif HTTP/1.1\" 200 2066"
+      }
+    }
+  }
+]
