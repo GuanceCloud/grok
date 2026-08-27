@@ -331,12 +331,12 @@ func DenormalizePattern(input string, denormalized ...PatternStorageIface) (
 
 	if err := walkPatternRefs(input, func(start, end int, ref patternRef) error {
 		if len(denormalized) == 0 {
-			return fmt.Errorf("no pattern foud for %%{%s}", ref.syntax)
+			return fmt.Errorf("no pattern found for %%{%s}", ref.syntax)
 		}
 
 		gP, ok := denormalized[0].GetPattern(ref.syntax)
 		if !ok {
-			return fmt.Errorf("no pattern foud for %%{%s}", ref.syntax)
+			return fmt.Errorf("no pattern found for %%{%s}", ref.syntax)
 		}
 
 		for key, dtype := range gP.varbType {
