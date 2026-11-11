@@ -2,6 +2,23 @@
 
 This library is a fork of [github.com/vjeantet/grok](https://github.com/vjeantet/grok) that parses grok patterns in Go.
 
+## Matching and compatibility
+
+Grok patterns execute through Go's `regexp` engine. The structured fast path
+has been removed to avoid maintaining a second matcher with different search,
+backtracking and capture behavior. Regexp prefilters and `MatcherSet` remain.
+
+The existing compile, typed capture, reusable buffer and run metadata APIs are
+preserved. `DisableFastPath()` is a deprecated no-op and `FastPathDisabled()`
+always returns `true`. Runs report `RunPathRegexp`, `FallbackNone` and zero
+`WorkUnits`; the legacy path and fallback constants retain their values and
+string representations for source compatibility.
+
+Patterns that previously used an efficient structured runner may take longer.
+Use the fixture and Pipeline benchmarks with representative inputs when
+upgrading; the historical fast-path benchmark results in the linked notes do not describe
+the current implementation.
+
 ## Project Notes
 
 - Performance results: [docs/perf/BENCHMARKS.md](./docs/perf/BENCHMARKS.md)

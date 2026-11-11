@@ -70,7 +70,7 @@ func BenchmarkDatakitFixtures(b *testing.B) {
 
 	for _, fixture := range fixtures {
 		fixture := fixture
-		b.Run(fixture.name+"/fast", func(b *testing.B) {
+		b.Run(fixture.name+"/grok", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.current.Run(fixture.line, true)
@@ -106,7 +106,7 @@ func BenchmarkDatakitFixturesWithTypeInfo(b *testing.B) {
 
 	for _, fixture := range fixtures {
 		fixture := fixture
-		b.Run(fixture.name+"/fast", func(b *testing.B) {
+		b.Run(fixture.name+"/grok", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.current.RunWithTypeInfo(fixture.line, true)
@@ -321,7 +321,8 @@ func compileDatakitPattern(pattern string, patterns map[string]string) (*GrokReg
 	if err != nil {
 		return nil, nil, err
 	}
-	regexpOnly.fastMatcher = nil
+	regexpOnly = rawRegexpCopy(regexpOnly)
+
 	return current, regexpOnly, nil
 }
 

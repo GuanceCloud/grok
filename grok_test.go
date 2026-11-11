@@ -51,37 +51,7 @@ func TestNormalizeAnonymousCaptures(t *testing.T) {
 	}
 }
 
-func TestStructuredIRMetadata(t *testing.T) {
-	g, err := CompilePattern(`%{WORD:name} - %{INT:id}`, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected structured matcher")
-	}
-	if got, want := g.fastMatcher.ir.MinWidth, 5; got != want {
-		t.Fatalf("minWidth = %d, want %d", got, want)
-	}
-	if g.fastMatcher.ir.FirstLiteral != "" {
-		t.Fatalf("unexpected firstLiteral %q", g.fastMatcher.ir.FirstLiteral)
-	}
-
-	optional, err := CompilePattern(`%{WORD:name}?bar`, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if optional.fastMatcher == nil {
-		t.Fatal("expected optional matcher")
-	}
-	if optional.fastMatcher.ir.FirstLiteral != "" {
-		t.Fatalf("optional matcher firstLiteral = %q, want empty", optional.fastMatcher.ir.FirstLiteral)
-	}
-	if got, want := optional.fastMatcher.ir.LastLiteral, "bar"; got != want {
-		t.Fatalf("lastLiteral = %q, want %q", got, want)
-	}
-}
-
-func TestStructuredCharClassInverseEscapesParity(t *testing.T) {
+func TestGrokCharClassInverseEscapesParity(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["ANY"] = `[\s\S]*`
 	patterns["NONDIGITS"] = `[\D]*`
@@ -131,21 +101,20 @@ func TestStructuredCharClassInverseEscapesParity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected structured fast matcher")
-			}
+
 			regexpOnly, err := CompilePattern(tc.pattern, storage)
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			assertRunParity(t, current, regexpOnly, tc.line, tc.trimSpace)
 		})
 	}
 }
 
-func TestStructuredFastPathUnsupportedRegexSyntaxFallsBack(t *testing.T) {
+func TestGrokRegexpSyntax(t *testing.T) {
 	cases := []struct {
 		name       string
 		customName string
@@ -235,9 +204,6 @@ func TestStructuredFastPathUnsupportedRegexSyntaxFallsBack(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if g.fastMatcher != nil {
-				t.Fatal("expected regexp fallback for unsupported fast-path syntax")
-			}
 
 			ret, err := g.Run(tc.line, false)
 			if !tc.wantMatch {
@@ -252,7 +218,7 @@ func TestStructuredFastPathUnsupportedRegexSyntaxFallsBack(t *testing.T) {
 	}
 }
 
-func TestStructuredSingleDotMatchesRegexp(t *testing.T) {
+func TestGrokSingleDotMatchesRegexp(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["DOT"] = `.`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -284,14 +250,13 @@ func TestStructuredSingleDotMatchesRegexp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected structured fast matcher")
-			}
+
 			regexpOnly, err := CompilePattern(tc.pattern, storage)
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			for _, line := range tc.lines {
 				assertRunParity(t, current, regexpOnly, line, false)
@@ -300,7 +265,7 @@ func TestStructuredSingleDotMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredFastPathDefaultPatternFallbacks(t *testing.T) {
+func TestGrokDefaultPatterns(t *testing.T) {
 	cases := []struct {
 		name    string
 		pattern string
@@ -338,7 +303,7 @@ func TestStructuredFastPathDefaultPatternFallbacks(t *testing.T) {
 	}
 }
 
-func TestStructuredGreedyLinesMatchesRegexpAcrossNewline(t *testing.T) {
+func TestGrokGreedyLinesMatchesRegexpAcrossNewline(t *testing.T) {
 	pattern := `%{GREEDYLINES:item}END`
 	line := "alpha\nbetaEND"
 
@@ -346,20 +311,18 @@ func TestStructuredGreedyLinesMatchesRegexpAcrossNewline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected GREEDYLINES to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	assertRunParity(t, current, regexpOnly, line, false)
 }
 
-func TestStructuredNegatedCharClassMatchesRegexp(t *testing.T) {
+func TestGrokNegatedCharClassMatchesRegexp(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["SINGLE_NOTHASH"] = `[^#]`
 	patterns["NOTHASH"] = `[^#]+`
@@ -424,21 +387,20 @@ func TestStructuredNegatedCharClassMatchesRegexp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected structured fast matcher")
-			}
+
 			regexpOnly, err := CompilePattern(tc.pattern, storage)
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			assertRunParity(t, current, regexpOnly, tc.line, false)
 		})
 	}
 }
 
-func TestStructuredEndAnchorMatchesRegexp(t *testing.T) {
+func TestGrokEndAnchorMatchesRegexp(t *testing.T) {
 	cases := []struct {
 		name    string
 		pattern string
@@ -465,14 +427,13 @@ func TestStructuredEndAnchorMatchesRegexp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected structured fast matcher")
-			}
+
 			regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			for _, line := range tc.lines {
 				assertRunParity(t, current, regexpOnly, line, false)
@@ -481,7 +442,7 @@ func TestStructuredEndAnchorMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredWhitespaceCharClassMatchesRegexpSpace(t *testing.T) {
+func TestGrokWhitespaceCharClassMatchesRegexpSpace(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["SP"] = `[\s]+`
 	patterns["TAB"] = `[\t]+`
@@ -521,14 +482,13 @@ func TestStructuredWhitespaceCharClassMatchesRegexpSpace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected structured fast matcher")
-			}
+
 			regexpOnly, err := CompilePattern(tc.pattern, storage)
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			for _, line := range tc.lines {
 				assertRunParity(t, current, regexpOnly, line, false)
@@ -537,39 +497,36 @@ func TestStructuredWhitespaceCharClassMatchesRegexpSpace(t *testing.T) {
 	}
 }
 
-func TestStructuredNotSpaceMatchesRegexpSpace(t *testing.T) {
+func TestGrokNotSpaceMatchesRegexpSpace(t *testing.T) {
 	current, err := CompilePattern(`%{NOTSPACE:item}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected structured fast matcher")
-	}
+
 	regexpOnly, err := CompilePattern(`%{NOTSPACE:item}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range []string{"x", "\v", " "} {
 		assertRunParity(t, current, regexpOnly, line, false)
 	}
 }
 
-func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
+func TestGrokTopLevelSearchMatchesRegexp(t *testing.T) {
 	g, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected structured matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `  prefix level=INFO msg="中文 message" suffix`
 	fastRet, fastErr := g.Run(line, true)
@@ -578,13 +535,10 @@ func TestStructuredTopLevelSearchMatchesRegexp(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredFastPathBoundaryGuidance(t *testing.T) {
-	unbounded, err := CompilePattern(`%{DATA:a}%{DATA:b}%{GREEDYDATA:c}`, PatternStorage{defalutDenormalizedPatterns})
+func TestGrokDelimitedCaptures(t *testing.T) {
+	_, err := CompilePattern(`%{DATA:a}%{DATA:b}%{GREEDYDATA:c}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if unbounded.fastMatcher != nil {
-		t.Fatal("expected adjacent unbounded DATA/GREEDYDATA pattern to fall back to regexp")
 	}
 
 	cases := []struct {
@@ -621,15 +575,13 @@ func TestStructuredFastPathBoundaryGuidance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.fastMatcher == nil {
-				t.Fatal("expected bounded pattern to use structured fast matcher")
-			}
 
 			regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
 			if err != nil {
 				t.Fatal(err)
 			}
-			regexpOnly.fastMatcher = nil
+
+			regexpOnly = rawRegexpCopy(regexpOnly)
 
 			fastRet, fastErr := current.Run(tc.line, true)
 			regexpRet, regexpErr := regexpOnly.Run(tc.line, true)
@@ -642,20 +594,18 @@ func TestStructuredFastPathBoundaryGuidance(t *testing.T) {
 	}
 }
 
-func TestStructuredAnchoredPatternKeepsStartSemantics(t *testing.T) {
+func TestGrokAnchoredPatternKeepsStartSemantics(t *testing.T) {
 	g, err := CompilePattern(`^level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected structured matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`^level=%{LOGLEVEL:level} msg="%{GREEDYDATA:msg}"`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `prefix level=INFO msg="anchored"`
 	_, fastErr := g.Run(line, true)
@@ -664,7 +614,7 @@ func TestStructuredAnchoredPatternKeepsStartSemantics(t *testing.T) {
 	assert.ErrorIs(t, regexpErr, ErrMismatch)
 }
 
-func TestStructuredTimestampAndHTTPDateMatchRegexpOnMalformedInput(t *testing.T) {
+func TestGrokTimestampAndHTTPDateMatchRegexpOnMalformedInput(t *testing.T) {
 	timestampPattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:level}\] \[%{NOTSPACE:thread}\] %{NOTSPACE:logger} - %{GREEDYDATA:msg}`
 	timestampLine := `0000-0-0 0000:0+0 [WAR] [0] 0 - `
 
@@ -676,7 +626,9 @@ func TestStructuredTimestampAndHTTPDateMatchRegexpOnMalformedInput(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
+
 	_, fastErr := current.Run(timestampLine, false)
 	_, regexpErr := regexpOnly.Run(timestampLine, false)
 	assert.ErrorIs(t, fastErr, ErrMismatch)
@@ -692,14 +644,14 @@ func TestStructuredTimestampAndHTTPDateMatchRegexpOnMalformedInput(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
 	_, fastErr = current.Run(httpLine, false)
 	_, regexpErr = regexpOnly.Run(httpLine, false)
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 	assert.ErrorIs(t, regexpErr, ErrMismatch)
 }
 
-func TestStructuredGreedyDataStopsAtNewlineLikeRegexp(t *testing.T) {
+func TestGrokGreedyDataStopsAtNewlineLikeRegexp(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["date"] = `%{YEAR}-%{MONTHNUM}-%{MONTHDAY} %{TIME}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -717,7 +669,8 @@ func TestStructuredGreedyDataStopsAtNewlineLikeRegexp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	fastRet, fastErr := current.Run(line, false)
 	regexpRet, regexpErr := regexpOnly.Run(line, false)
@@ -885,15 +838,13 @@ func TestRunWithTypeInfoStructuredFastPathMatchesRegexp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected typed pattern to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	fastRet, fastErr := current.RunWithTypeInfo(line, true)
 	regexpRet, regexpErr := regexpOnly.RunWithTypeInfo(line, true)
@@ -908,15 +859,13 @@ func TestRunWithTypeInfoMatchesRegexpPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fast.fastMatcher == nil {
-		t.Fatal("expected structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := "1 true 1.1"
 	fastRet, fastErr := fast.RunWithTypeInfo(line, true)
@@ -967,15 +916,13 @@ func TestCommonApacheRunnerSkipsCustomPatternDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.commonRunner != nil {
-		t.Fatal("custom COMMONAPACHELOG definition should not use default Apache runner")
-	}
 
 	regexpOnly, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 200 42`
 	fastRet, fastErr := current.Run(line, true)
@@ -997,15 +944,13 @@ func TestCommonApacheRunnerSkipsOverriddenNestedDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.commonRunner != nil {
-		t.Fatal("COMMONAPACHELOG with overridden WORD should not use default Apache runner")
-	}
 
 	regexpOnly, err := CompilePattern("%{COMMONAPACHELOG}", PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326`
 	fastRet, fastErr := current.Run(line, true)
@@ -1029,15 +974,13 @@ func TestRabbitMQRunnerSkipsOverriddenDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.rabbitRunner != nil {
-		t.Fatal("RabbitMQ runner should not run with overridden DATA")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `not-int [INFO] hello`
 	fastRet, fastErr := current.Run(line, true)
@@ -1059,15 +1002,13 @@ func TestSolrRunnerSkipsOverriddenReporterDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.solrRunner != nil {
-		t.Fatal("Solr runner should not run with incompatible solrReporter definition")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `2024-01-02T03:04:05Z INFO (thread-1) [   ] org.apache.solr.Core message`
 	fastRet, fastErr := current.Run(line, true)
@@ -1135,15 +1076,13 @@ func TestSpecializedRunnerSkipsOverriddenPrimitiveDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.mysqlRunner != nil {
-		t.Fatal("mysql runner should not run when WORD is overridden")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `2026-04-24T10:31:42.981+08:00 183742 SELECT SELECT * FROM orders`
 	fastRet, fastErr := current.Run(line, true)
@@ -1167,15 +1106,13 @@ func TestSpecializedRunnerSkipsOverriddenNestedDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher != nil && current.fastMatcher.nginxErrorRunner != nil {
-		t.Fatal("nginx error runner should not run when APPDATE dependency is overridden")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `2026/04/22 10:11:12 [error] upstream timed out, client: 10.0.0.8, server: gateway.local, request: "GET /api/orders HTTP/1.1", host: "demo.local"`
 	fastRet, fastErr := current.Run(line, true)
@@ -1184,37 +1121,7 @@ func TestSpecializedRunnerSkipsOverriddenNestedDependency(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestPostfixRunnerSkipsOverriddenDependency(t *testing.T) {
-	patterns := CopyDefalutPatterns()
-	patterns["QUEUEID"] = `[0-9A-F]{10,11}`
-	patterns["WORD"] = `%{INT}`
-	denorm, errs := DenormalizePatternsFromMap(patterns)
-	if len(errs) != 0 {
-		t.Fatalf("denormalize custom patterns: %v", errs)
-	}
-
-	current, err := CompilePattern(postfixQueuePattern, PatternStorage{denorm})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.fastMatcher != nil && current.fastMatcher.postfixRunner != nil {
-		t.Fatal("postfix runner should not run when WORD is overridden")
-	}
-
-	regexpOnly, err := CompilePattern(postfixQueuePattern, PatternStorage{denorm})
-	if err != nil {
-		t.Fatal(err)
-	}
-	regexpOnly.fastMatcher = nil
-
-	line := `Apr 22 10:11:12 mail-01 postfix[12345]: 3F4A2BC901: status=deferred`
-	fastRet, fastErr := current.Run(line, true)
-	regexpRet, regexpErr := regexpOnly.Run(line, true)
-	assert.Equal(t, regexpErr, fastErr)
-	assert.Equal(t, regexpRet, fastRet)
-}
-
-func TestStructuredCompositePattern(t *testing.T) {
+func TestGrokCompositePattern(t *testing.T) {
 	pattern := `%{NOTSPACE:remote_addr} - %{NOTSPACE:remote_user} \[%{DATA:time_local}\] "%{WORD:method} %{NOTSPACE:request} HTTP/%{NUMBER:http_version}" %{INT:status} %{INT:body_bytes_sent}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -1236,7 +1143,7 @@ func TestStructuredCompositePattern(t *testing.T) {
 	assert.Equal(t, "207", ret[g.nameIndex["body_bytes_sent"]])
 }
 
-func TestStructuredSQLServerPattern(t *testing.T) {
+func TestGrokSQLServerPattern(t *testing.T) {
 	pattern := `%{TIMESTAMP_ISO8601:time} %{NOTSPACE:origin}\s+%{GREEDYDATA:msg}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -1254,15 +1161,11 @@ func TestStructuredSQLServerPattern(t *testing.T) {
 	assert.Equal(t, "Error: login failed for user test", ret[g.nameIndex["msg"]])
 }
 
-func TestStructuredApacheAccessPattern(t *testing.T) {
+func TestGrokApacheAccessPattern(t *testing.T) {
 	pattern := `%{GREEDYDATA:ip_or_host} - - \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{NUMBER:http_code} `
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if g.fastMatcher == nil {
-		t.Fatal("expected apache access pattern to use structured fast matcher")
 	}
 
 	line := `127.0.0.1 - - [17/May/2021:14:51:09 +0800] "GET /server-status?auto HTTP/1.1" 200 `
@@ -1278,22 +1181,19 @@ func TestStructuredApacheAccessPattern(t *testing.T) {
 	assert.Equal(t, "200", ret[g.nameIndex["http_code"]])
 }
 
-func TestStructuredApacheErrorMatchesRegexp(t *testing.T) {
+func TestGrokApacheErrorMatchesRegexp(t *testing.T) {
 	pattern := `\[%{HTTPDERROR_DATE:time}\] \[%{GREEDYDATA:type}:%{GREEDYDATA:status}\] \[pid %{GREEDYDATA:pid}:tid %{GREEDYDATA:tid}\] `
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if current.fastMatcher == nil {
-		t.Fatal("expected apache error pattern to use structured fast matcher")
-	}
-
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `[Wed Jun 02 16:32:14.123456 2021] [authz_core:error] [pid 1234:tid 140735] `
 	fastRet, fastErr := current.Run(line, true)
@@ -1307,22 +1207,19 @@ func TestStructuredApacheErrorMatchesRegexp(t *testing.T) {
 	assert.Equal(t, "140735", fastRet[current.nameIndex["tid"]])
 }
 
-func TestStructuredApacheErrorPidOnlyMatchesRegexp(t *testing.T) {
+func TestGrokApacheErrorPidOnlyMatchesRegexp(t *testing.T) {
 	pattern := `\[%{HTTPDERROR_DATE:time}\] \[%{GREEDYDATA:type}:%{GREEDYDATA:status}\] \[pid %{INT:pid}\] `
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if current.fastMatcher == nil {
-		t.Fatal("expected apache error pid-only pattern to use structured fast matcher")
-	}
-
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `[Tue May 19 18:39:45.272121 2021] [access_compat:error] [pid 9802] `
 	fastRet, fastErr := current.Run(line, true)
@@ -1340,9 +1237,6 @@ func TestElasticsearchSearchSlowPattern(t *testing.T) {
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher == nil || g.fastMatcher.elasticSearchRunner == nil {
-		t.Fatalf("expected elasticsearch search slow runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
 	}
 
 	line := `[2021-06-01T11:56:06,712][WARN ][i.s.s.query              ] [master] [shopping][0] took[36.3ms], took_millis[36], total_hits[5 hits], types[], stats[], search_type[QUERY_THEN_FETCH], total_shards[1], source[{"query":{"match":{"name":{"query":"Nariko","operator":"OR","prefix_length":0,"max_expansions":50,"fuzzy_transpositions":true,"lenient":false,"zero_terms_query":"NONE","auto_generate_synonyms_phrase_query":true,"boost":1.0}}},"sort":[{"price":{"order":"desc"}}]}], id[],`
@@ -1363,9 +1257,6 @@ func TestElasticsearchIndexSlowPattern(t *testing.T) {
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher == nil || g.fastMatcher.elasticRunner == nil {
-		t.Fatalf("expected elasticsearch index slow runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
 	}
 
 	line := `[2021-06-01T11:56:19,084][WARN ][i.i.s.index              ] [master] [shopping/X17jbNZ4SoS65zKTU9ZAJg] took[34.1ms], took_millis[34], type[_doc], id[LgC3xXkBLT9WrDT1Dovp], routing[], source[{"price":222,"name":"hello"}]`
@@ -1399,21 +1290,19 @@ func TestRunToReusesCallerBuffer(t *testing.T) {
 	assert.Equal(t, &buf[:2][0], &ret[0])
 }
 
-func TestStructuredWordBeforeLiteralPreservesRegexpValidation(t *testing.T) {
+func TestGrokWordBeforeLiteralPreservesRegexpValidation(t *testing.T) {
 	pattern := `%{WORD:w} %{NUMBER:n}`
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	fastRet, fastErr := current.Run(": 9", true)
 	regexpRet, regexpErr := regexpOnly.Run(": 9", true)
@@ -1421,7 +1310,7 @@ func TestStructuredWordBeforeLiteralPreservesRegexpValidation(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredURIHostWithPortMatchesRegexpCaptures(t *testing.T) {
+func TestGrokURIHostWithPortMatchesRegexpCaptures(t *testing.T) {
 	pattern := `%{URIHOST:h}`
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -1432,7 +1321,8 @@ func TestStructuredURIHostWithPortMatchesRegexpCaptures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := "example.com:8080"
 	fastRet, fastErr := current.Run(line, true)
@@ -1443,21 +1333,19 @@ func TestStructuredURIHostWithPortMatchesRegexpCaptures(t *testing.T) {
 	assert.Equal(t, "8080", fastRet[current.nameIndex["port"]])
 }
 
-func TestStructuredIPOrHostPreservesIPv6ZoneIdentifier(t *testing.T) {
+func TestGrokIPOrHostPreservesIPv6ZoneIdentifier(t *testing.T) {
 	pattern := `%{IPORHOST:h}`
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := "fe80::1%eth0"
 	fastRet, fastErr := current.Run(line, true)
@@ -1473,15 +1361,13 @@ func TestTerminalGreedyDataDoesNotCrossNewline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil || current.fastMatcher.anchoredRunner == nil {
-		t.Fatalf("expected anchored runner, steps=%s", describeStructuredMatcherSteps(current.fastMatcher))
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := "foo bar\nbaz"
 	fastRet, fastErr := current.Run(line, true)
@@ -1516,18 +1402,13 @@ func TestElasticsearchDefaultPatternOptionalNodeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected elasticsearch default to use structured fast matcher")
-	}
-	if current.fastMatcher.backtracking {
-		t.Fatal("expected elasticsearch default optional node id to avoid backtracking")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		`[2021-06-01T11:45:15,927][WARN ][o.e.c.r.a.DiskThresholdMonitor] [master] high disk watermark [90%] exceeded`,
@@ -1568,21 +1449,14 @@ func TestKingbaseDefaultPattern(t *testing.T) {
 	assert.Equal(t, `relation "sys_stat_activity" does not exist at character 240`, ret[g.nameIndex["msg"]])
 }
 
-func TestStructuredNginxAccessPattern(t *testing.T) {
+func TestGrokNginxAccessPattern(t *testing.T) {
 	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.fastMatcher == nil || g.fastMatcher.accessRunner == nil {
-		t.Fatalf("expected nginx access pattern to use access runner, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
-	}
 
 	line := `127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`
-	dst := make([]string, len(g.subMatchNames.name))
-	if !g.fastMatcher.accessRunner.run(dst, line, true) {
-		t.Fatalf("expected nginx access runner to match line, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
-	}
 
 	ret, err := g.Run(line, true)
 	if err != nil {
@@ -1600,25 +1474,15 @@ func TestStructuredNginxAccessPattern(t *testing.T) {
 	assert.Equal(t, "207", ret[g.nameIndex["bytes"]])
 }
 
-func TestStructuredJenkinsPatternUsesFastMatcher(t *testing.T) {
+func TestGrokJenkinsPatternMatchesRegexp(t *testing.T) {
 	pattern := `%{TIMESTAMP_ISO8601:time} \[id=%{GREEDYDATA:id}\]\t%{GREEDYDATA:status}\t`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if g.fastMatcher == nil {
-		t.Fatal("expected jenkins pattern to use structured fast matcher")
-	}
-	if g.fastMatcher.jenkinsRunner == nil {
-		t.Fatal("expected jenkins pattern to use jenkins runner")
-	}
-
 	line := `2021-05-18 03:08:58.053+0000 [id=32]	INFO	jenkins.InitReactorRunner$1#onAttained: Started all plugins`
-	dst := make([]string, len(g.subMatchNames.name))
-	if !g.fastMatcher.jenkinsRunner.run(dst, line, true) {
-		t.Fatalf("expected jenkins runner to match line, steps=%s", describeStructuredMatcherSteps(g.fastMatcher))
-	}
+
 	ret, err := g.Run(line, true)
 	if err != nil {
 		t.Fatal(err)
@@ -1629,22 +1493,8 @@ func TestStructuredJenkinsPatternUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, "INFO", ret[g.nameIndex["status"]])
 }
 
-func TestStructuredJenkinsFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokJenkinsFixtureMatchesRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "jenkins/jenkins/jenkins/Jenkins_log")
-	if fixture.current.fastMatcher == nil {
-		t.Fatal("expected jenkins fixture to use structured fast matcher")
-	}
-	if fixture.current.fastMatcher.jenkinsRunner == nil {
-		t.Fatal("expected jenkins fixture to use jenkins runner")
-	}
-
-	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.jenkinsRunner.run(dst, fixture.line, true) {
-		t.Fatalf("expected jenkins runner to match line, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-		t.Fatalf("expected jenkins fixture fast matcher to succeed, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
@@ -1652,7 +1502,7 @@ func TestStructuredJenkinsFixtureUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredSimpleCharClassPattern(t *testing.T) {
+func TestGrokSimpleCharClassPattern(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["date2"] = `%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -1666,10 +1516,6 @@ func TestStructuredSimpleCharClassPattern(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if g.fastMatcher == nil {
-		t.Fatal("expected simple char class pattern to use structured fast matcher")
-	}
-
 	line := `2021/04/29 16:24:38 [emerg] unexpected ";" in /usr/local/etc/nginx/nginx.conf:23`
 	ret, err := g.Run(line, true)
 	if err != nil {
@@ -1681,14 +1527,10 @@ func TestStructuredSimpleCharClassPattern(t *testing.T) {
 	assert.Equal(t, `unexpected ";" in /usr/local/etc/nginx/nginx.conf:23`, ret[g.nameIndex["msg"]])
 }
 
-func TestStructuredOptionalRefPattern(t *testing.T) {
+func TestGrokOptionalRefPattern(t *testing.T) {
 	g, err := CompilePattern(`prefix %{WORD:name}? suffix`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if g.fastMatcher == nil {
-		t.Fatal("expected optional ref pattern to use structured fast matcher")
 	}
 
 	ret, err := g.Run(`prefix hello suffix`, true)
@@ -1704,14 +1546,10 @@ func TestStructuredOptionalRefPattern(t *testing.T) {
 	assert.Equal(t, "", ret[g.nameIndex["name"]])
 }
 
-func TestStructuredOptionalLiteralPattern(t *testing.T) {
+func TestGrokOptionalLiteralPattern(t *testing.T) {
 	g, err := CompilePattern(`\[%{HOST:host}?\]`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if g.fastMatcher == nil {
-		t.Fatal("expected optional literal pattern to use structured fast matcher")
 	}
 
 	ret, err := g.Run(`[example.com]`, true)
@@ -1727,26 +1565,22 @@ func TestStructuredOptionalLiteralPattern(t *testing.T) {
 	assert.Equal(t, "", ret[g.nameIndex["host"]])
 
 	dst := make([]string, len(g.subMatchNames.name))
-	if !g.fastMatcher.match(dst, `[]`, true, nil) {
-		t.Fatal("expected optional literal fast matcher to match empty host")
-	}
+
 	assert.Equal(t, "", dst[g.nameIndex["host"]])
 }
 
-func TestStructuredHTTPD20ErrorLogUsesFastMatcher(t *testing.T) {
+func TestGrokHTTPD20ErrorLogMatchesRegexp(t *testing.T) {
 	current, err := CompilePattern(`%{HTTPD20_ERRORLOG}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected HTTPD20_ERRORLOG to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`%{HTTPD20_ERRORLOG}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		`[Wed Jun 02 16:32:14.123456 2021] [error] [client 127.0.0.1] client denied by server configuration: /var/www/html/private`,
@@ -1761,37 +1595,7 @@ func TestStructuredHTTPD20ErrorLogUsesFastMatcher(t *testing.T) {
 	}
 }
 
-func TestStructuredCharClassStarPattern(t *testing.T) {
-	patterns := CopyDefalutPatterns()
-	patterns["session_id"] = `([.0-9a-z]*)`
-	denorm, errs := DenormalizePatternsFromMap(patterns)
-	if len(errs) != 0 {
-		t.Fatal(errs)
-	}
-
-	pattern := `%{session_id:session_id}:`
-	g, err := CompilePattern(pattern, PatternStorage{denorm})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	meta, err := loadCompiledRegexpMeta(g.grokPattern.denormalized)
-	if err != nil {
-		t.Fatal(err)
-	}
-	steps, ok := compileStructuredSteps(pattern, PatternStorage{denorm}, meta, 0)
-	if !ok || len(steps) == 0 {
-		t.Fatal("expected char class star pattern to compile into structured steps")
-	}
-
-	ret, err := g.Run(`60b48f01.12241:`, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, "60b48f01.12241", ret[g.nameIndex["session_id"]])
-}
-
-func TestStructuredNginxErrorPatternUsesFastMatcher(t *testing.T) {
+func TestGrokNginxErrorPatternMatchesRegexp(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["date2"] = `%{YEAR}[./]%{MONTHNUM}[./]%{MONTHDAY} %{TIME}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -1803,10 +1607,6 @@ func TestStructuredNginxErrorPatternUsesFastMatcher(t *testing.T) {
 	g, err := CompilePattern(pattern, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if g.fastMatcher == nil {
-		t.Fatal("expected nginx error pattern to use structured fast matcher")
 	}
 
 	line := `2021/04/21 09:24:04 [alert] write() to "/var/log/nginx/access.log" failed (28: No space left on device) while logging request, client: 120.204.196.129, server: localhost, request: "GET / HTTP/1.1", host: "47.98.103.73"`
@@ -1825,7 +1625,7 @@ func TestStructuredNginxErrorPatternUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, "47.98.103.73", ret[g.nameIndex["ip_or_host"]])
 }
 
-func TestStructuredPostgreSQLPatternUsesFastMatcher(t *testing.T) {
+func TestGrokPostgreSQLPatternMatchesRegexp(t *testing.T) {
 	var script, line string
 	for _, c := range loadDatakitFixtureCases(t) {
 		if c.Collector != "postgresql" {
@@ -1848,12 +1648,6 @@ func TestStructuredPostgreSQLPatternUsesFastMatcher(t *testing.T) {
 	}
 
 	g := compiled.patterns[0].current
-	if g.fastMatcher == nil {
-		t.Fatal("expected postgresql pattern to use structured fast matcher")
-	}
-	if !g.fastMatcher.backtracking {
-		t.Fatal("expected postgresql pattern to use backtracking fast matcher")
-	}
 
 	ret, err := g.Run(line, true)
 	if err != nil {
@@ -1870,25 +1664,20 @@ func TestStructuredPostgreSQLPatternUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, "LOG", ret[g.nameIndex["status"]])
 }
 
-func TestStructuredGreedyLiteralBacktracksLikeRegexp(t *testing.T) {
+func TestGrokGreedyLiteralBacktracksLikeRegexp(t *testing.T) {
 	pattern := `\[%{GREEDYDATA:application}\]%{SPACE}%{USER:user}%{SPACE}\[%{HOST:remote_host}\]`
 
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected greedy literal pattern to use structured fast matcher")
-	}
-	if !current.fastMatcher.backtracking {
-		t.Fatal("expected greedy literal pattern to require backtracking")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `[pgAdmin 4 - DB:postgres] postgres [127.0.0.1]`
 	fastRet, fastErr := current.Run(line, true)
@@ -1900,22 +1689,20 @@ func TestStructuredGreedyLiteralBacktracksLikeRegexp(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", fastRet[current.nameIndex["remote_host"]])
 }
 
-func TestStructuredOptionalLiteralBoundaryMatchesRegexp(t *testing.T) {
+func TestGrokOptionalLiteralBoundaryMatchesRegexp(t *testing.T) {
 	pattern := `%{DATA:msg}foo?bar`
 
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected optional literal boundary pattern to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range []string{"zzzfoobar", "zzzbar"} {
 		fastRet, fastErr := current.Run(line, true)
@@ -1925,22 +1712,20 @@ func TestStructuredOptionalLiteralBoundaryMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredParserBoundaryAcrossSpaceMatchesRegexp(t *testing.T) {
+func TestGrokParserBoundaryAcrossSpaceMatchesRegexp(t *testing.T) {
 	pattern := `%{NOTSPACE:name}%{SPACE}\]`
 
 	current, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected parser boundary pattern to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range []string{"foo]", "foo ]"} {
 		fastRet, fastErr := current.Run(line, true)
@@ -1950,22 +1735,11 @@ func TestStructuredParserBoundaryAcrossSpaceMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredRedisFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokRedisFixtureMatchesRegexp(t *testing.T) {
 	fixtures, _ := loadMatchedDatakitFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.collector != "redis" {
 			continue
-		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatal("expected redis fixture to use structured fast matcher")
-		}
-
-		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-			t.Fatal("expected redis fixture fast matcher to succeed")
-		}
-		if fixture.current.fastMatcher.backtracking {
-			t.Fatal("expected redis fixture fast matcher to avoid backtracking")
 		}
 
 		ret, err := fixture.current.Run(fixture.line, true)
@@ -1983,19 +1757,11 @@ func TestStructuredRedisFixtureUsesFastMatcher(t *testing.T) {
 	t.Fatal("expected redis fixture")
 }
 
-func TestStructuredConsulFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokConsulFixtureMatchesRegexp(t *testing.T) {
 	fixtures, _ := loadMatchedDatakitFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.collector != "consul" {
 			continue
-		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatal("expected consul fixture to use structured fast matcher")
-		}
-
-		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-			t.Fatal("expected consul fixture fast matcher to succeed")
 		}
 
 		ret, err := fixture.current.Run(fixture.line, true)
@@ -2012,7 +1778,7 @@ func TestStructuredConsulFixtureUsesFastMatcher(t *testing.T) {
 	t.Fatal("expected consul fixture")
 }
 
-func TestStructuredConsulFixtureRejectsZeroPidLikeRegexp(t *testing.T) {
+func TestGrokConsulFixtureRejectsZeroPidLikeRegexp(t *testing.T) {
 	fixtures, _ := loadMatchedDatakitFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.name != "consul/consul/consul/Consul_log" {
@@ -2030,7 +1796,7 @@ func TestStructuredConsulFixtureRejectsZeroPidLikeRegexp(t *testing.T) {
 	t.Fatal("expected consul fixture")
 }
 
-func TestStructuredConsulFixtureRejectsEmbeddedMonthStartLikeRegexp(t *testing.T) {
+func TestGrokConsulFixtureRejectsEmbeddedMonthStartLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "consul/consul/consul/Consul_log")
 	line := "0Sep 1 0:00:00 0 consul[1]:00-1-1T0:00:00+0[WARN]0:"
 
@@ -2040,7 +1806,7 @@ func TestStructuredConsulFixtureRejectsEmbeddedMonthStartLikeRegexp(t *testing.T
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 }
 
-func TestStructuredConsulFixtureRejectsSingleColonIPv6LikeHostLikeRegexp(t *testing.T) {
+func TestGrokConsulFixtureRejectsSingleColonIPv6LikeHostLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "consul/consul/consul/Consul_log")
 	line := "Sep 1 0:00:00A: consul[1]:00-1-1T0:00:00+0[INFO]0:"
 
@@ -2050,7 +1816,7 @@ func TestStructuredConsulFixtureRejectsSingleColonIPv6LikeHostLikeRegexp(t *test
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 }
 
-func TestStructuredConsulFixtureRejectsPseudoIPv6HostLikeRegexp(t *testing.T) {
+func TestGrokConsulFixtureRejectsPseudoIPv6HostLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "consul/consul/consul/Consul_log")
 	line := "Sep 1 0:00:00A:0: consul[1]:00-1-1T0:00:00+0[INFO]0:"
 
@@ -2060,7 +1826,7 @@ func TestStructuredConsulFixtureRejectsPseudoIPv6HostLikeRegexp(t *testing.T) {
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 }
 
-func TestStructuredConsulFixtureRejectsOversizedHostLabelLikeRegexp(t *testing.T) {
+func TestGrokConsulFixtureRejectsOversizedHostLabelLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "consul/consul/consul/Consul_log")
 	line := "Sep 1 0:00:00 0000000000000000000000000000000000000000000000000000000000000000 consul[1]:00-1-1T0:00:00+0[WARN]0:"
 
@@ -2070,14 +1836,11 @@ func TestStructuredConsulFixtureRejectsOversizedHostLabelLikeRegexp(t *testing.T
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 }
 
-func TestStructuredMySQLSlowFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokMySQLSlowFixtureMatchesRegexp(t *testing.T) {
 	fixtures, _ := loadMatchedDatakitFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.name != "mysql/mysql/mysql/MySQL_slow_log" {
 			continue
-		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatal("expected mysql slow fixture to use structured fast matcher")
 		}
 
 		ret, err := fixture.current.Run(fixture.line, true)
@@ -2098,7 +1861,7 @@ func TestStructuredMySQLSlowFixtureUsesFastMatcher(t *testing.T) {
 	t.Fatal("expected mysql slow fixture")
 }
 
-func TestStructuredMySQLSlowFixtureRejectsTrailingDecimalPointLikeRegexp(t *testing.T) {
+func TestGrokMySQLSlowFixtureRejectsTrailingDecimalPointLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "mysql/mysql/mysql/MySQL_slow_log")
 	line := "# Time: 00-1-1 000000,000000\n# User@Host: 0000000000 @ 000000000 [0000000]  Id:   000\n# Query_time: 00000000 Lock_time: 0. Rows_sent: 00 Rows_examined: 0\n"
 
@@ -2108,7 +1871,7 @@ func TestStructuredMySQLSlowFixtureRejectsTrailingDecimalPointLikeRegexp(t *test
 	assert.ErrorIs(t, fastErr, ErrMismatch)
 }
 
-func TestStructuredOptionalYearBeforeTimeMatchesRegexp(t *testing.T) {
+func TestGrokOptionalYearBeforeTimeMatchesRegexp(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["date2"] = `%{MONTHDAY} %{MONTH} %{YEAR}?%{TIME}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -2120,18 +1883,13 @@ func TestStructuredOptionalYearBeforeTimeMatchesRegexp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected date2 to use structured fast matcher")
-	}
-	if current.fastMatcher.backtracking {
-		t.Fatal("expected optional year/time matcher to avoid backtracking")
-	}
 
 	regexpOnly, err := CompilePattern(`%{date2:time}`, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		`14 May 2019 19:11:40.164`,
@@ -2146,22 +1904,11 @@ func TestStructuredOptionalYearBeforeTimeMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredSolrFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokSolrFixtureMatchesRegexp(t *testing.T) {
 	fixtures, _ := loadMatchedDatakitFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.collector != "solr" {
 			continue
-		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatal("expected solr fixture to use structured fast matcher")
-		}
-		if fixture.current.fastMatcher.solrRunner == nil {
-			t.Fatal("expected solr fixture to use solr runner")
-		}
-
-		dst := make([]string, len(fixture.current.subMatchNames.name))
-		if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-			t.Fatal("expected solr fixture fast matcher to succeed")
 		}
 
 		ret, err := fixture.current.Run(fixture.line, true)
@@ -2178,19 +1925,8 @@ func TestStructuredSolrFixtureUsesFastMatcher(t *testing.T) {
 	t.Fatal("expected solr fixture")
 }
 
-func TestStructuredElasticSearchDefaultFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokElasticSearchDefaultFixtureMatchesRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "elasticsearch/elasticsearch/elasticsearch/ElasticSearch_log")
-	if fixture.current.fastMatcher == nil {
-		t.Fatal("expected elasticsearch default fixture to use structured fast matcher")
-	}
-	if fixture.current.fastMatcher.backtracking {
-		t.Fatal("expected elasticsearch default fixture to avoid backtracking")
-	}
-
-	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-		t.Fatal("expected elasticsearch default fixture fast matcher to succeed")
-	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
@@ -2198,20 +1934,8 @@ func TestStructuredElasticSearchDefaultFixtureUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredTomcatCatalinaFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokTomcatCatalinaFixtureMatchesRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "tomcat/tomcat/tomcat/Tomcat_Catalina_log")
-	if fixture.current.fastMatcher == nil {
-		t.Fatal("expected tomcat catalina fixture to use structured fast matcher")
-	}
-	if fixture.current.fastMatcher.tomcatRunner == nil {
-		t.Fatal("expected tomcat catalina fixture to use tomcat catalina runner")
-	}
-
-	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
-		t.Fatalf("expected tomcat catalina fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
@@ -2219,20 +1943,8 @@ func TestStructuredTomcatCatalinaFixtureUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredRabbitMQFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokRabbitMQFixtureMatchesRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "rabbitmq/rabbitmq/rabbitmq/RabbitMQ_log")
-	if fixture.current.fastMatcher == nil {
-		t.Fatal("expected rabbitmq fixture to use structured fast matcher")
-	}
-	if fixture.current.fastMatcher.rabbitRunner == nil {
-		t.Fatal("expected rabbitmq fixture to use rabbit runner")
-	}
-
-	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
-		t.Fatalf("expected rabbitmq fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
@@ -2240,24 +1952,8 @@ func TestStructuredRabbitMQFixtureUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredNginxAccessFixtureUsesFastMatcher(t *testing.T) {
+func TestGrokNginxAccessFixtureMatchesRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "nginx/nginx/nginx/Nginx_access_log")
-	if fixture.current.fastMatcher == nil {
-		t.Fatal("expected nginx access fixture to use structured fast matcher")
-	}
-	if fixture.current.fastMatcher.accessRunner == nil {
-		t.Fatalf("expected nginx access fixture to use access runner, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
-	dst := make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.accessRunner.run(dst, fixture.line, true) {
-		t.Fatalf("expected nginx access runner to match fixture line, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
-
-	dst = make([]string, len(fixture.current.subMatchNames.name))
-	if !fixture.current.fastMatcher.match(dst, fixture.line, true, nil) {
-		step, pos := traceStructuredMatcherFailure(fixture.current.fastMatcher, fixture.line, true)
-		t.Fatalf("expected nginx access fixture fast matcher to succeed, failed at step %d pos %d steps=%s", step, pos, describeStructuredMatcherSteps(fixture.current.fastMatcher))
-	}
 
 	fastRet, fastErr := fixture.current.Run(fixture.line, true)
 	regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
@@ -2265,7 +1961,7 @@ func TestStructuredNginxAccessFixtureUsesFastMatcher(t *testing.T) {
 	assert.Equal(t, regexpRet, fastRet)
 }
 
-func TestStructuredNginxAccessRejectsDoubleSpaceLikeRegexp(t *testing.T) {
+func TestGrokNginxAccessRejectsDoubleSpaceLikeRegexp(t *testing.T) {
 	fixture := mustDatakitFixtureByName(t, "nginx/nginx/nginx/Nginx_access_log")
 	lines := []string{
 		`127.0.0.  0 0 [01/May/0000:00:00:00 00000] "000 0000000000000 HTTP/000" 000 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`,
@@ -2280,91 +1976,7 @@ func TestStructuredNginxAccessRejectsDoubleSpaceLikeRegexp(t *testing.T) {
 	}
 }
 
-func traceStructuredMatcherFailure(m *structuredMatcher, content string, trimSpace bool) (int, int) {
-	pos := 0
-	for i, step := range m.steps {
-		switch {
-		case step.literal != "":
-			if !strings.HasPrefix(content[pos:], step.literal) {
-				return i, pos
-			}
-			pos += len(step.literal)
-		case step.parser != nil:
-			if step.optional && step.deterministicOptional && shouldSkipOptionalParser(step.parser, step, content, pos) {
-				continue
-			}
-			next, _, ok := step.parser.consume(content, pos)
-			if !ok {
-				if step.optional {
-					continue
-				}
-				return i, pos
-			}
-			pos = next
-		case step.submatcher != nil:
-			next, ok := step.submatcher.matchLinearFrom(nil, content, pos, trimSpace, nil)
-			if !ok {
-				if step.optional {
-					continue
-				}
-				return i, pos
-			}
-			pos = next
-		case len(step.alternatives) > 0:
-			okAny := false
-			for _, alt := range matchingAlternatives(step, content, pos) {
-				next, ok := alt.matchLinearFrom(nil, content, pos, trimSpace, nil)
-				if ok {
-					pos = next
-					okAny = true
-					break
-				}
-			}
-			if !okAny {
-				if step.optional {
-					continue
-				}
-				return i, pos
-			}
-		}
-	}
-	return -1, pos
-}
-
-func describeStructuredMatcherSteps(m *structuredMatcher) string {
-	if m == nil {
-		return "<nil>"
-	}
-	parts := make([]string, 0, len(m.steps))
-	for i, step := range m.steps {
-		label := ""
-		switch {
-		case step.literal != "":
-			label = "lit:" + step.literal
-		case step.parser != nil:
-			label = "parser"
-			if step.parser.wrapPrefix != "" || step.parser.wrapSuffix != "" {
-				label += "(" + step.parser.wrapPrefix + "," + step.parser.wrapSuffix + ")"
-			}
-		case step.submatcher != nil:
-			label = "sub"
-		case len(step.alternatives) > 0:
-			label = "alt"
-		default:
-			label = "empty"
-		}
-		if step.optional {
-			label += "?"
-		}
-		parts = append(parts, label)
-		if i+1 < len(m.steps) {
-			parts = append(parts, " | ")
-		}
-	}
-	return strings.Join(parts, "")
-}
-
-func TestStructuredLogLevelPattern(t *testing.T) {
+func TestGrokLogLevelPattern(t *testing.T) {
 	pattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -2382,7 +1994,7 @@ func TestStructuredLogLevelPattern(t *testing.T) {
 	assert.Equal(t, "database connection failed", ret[g.nameIndex["msg"]])
 }
 
-func TestStructuredUTFMessageTrimmedLikeRegexp(t *testing.T) {
+func TestGrokUTFMessageTrimmedLikeRegexp(t *testing.T) {
 	pattern := `%{TIMESTAMP_ISO8601:time} \[%{LOGLEVEL:status}\] %{GREEDYDATA:msg}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
@@ -2403,7 +2015,9 @@ func TestStructuredUTFMessageTrimmedLikeRegexp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
+
 	regexpRet, err := regexpOnly.Run(line, true)
 	if err != nil {
 		t.Fatal(err)
@@ -2412,20 +2026,18 @@ func TestStructuredUTFMessageTrimmedLikeRegexp(t *testing.T) {
 	assert.Equal(t, regexpRet, ret)
 }
 
-func TestStructuredMonthMatchesDefaultRegexp(t *testing.T) {
+func TestGrokMonthMatchesDefaultRegexp(t *testing.T) {
 	current, err := CompilePattern(`%{MONTH:month}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected MONTH to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`%{MONTH:month}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		"Jan", "Januar",
@@ -2446,20 +2058,18 @@ func TestStructuredMonthMatchesDefaultRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredDayMatchesDefaultRegexp(t *testing.T) {
+func TestGrokDayMatchesDefaultRegexp(t *testing.T) {
 	current, err := CompilePattern(`%{DAY:day}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected DAY to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`%{DAY:day}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		"Mon", "Monday",
@@ -2480,20 +2090,18 @@ func TestStructuredDayMatchesDefaultRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredHostNameMatchesDefaultRegexp(t *testing.T) {
+func TestGrokHostNameMatchesDefaultRegexp(t *testing.T) {
 	current, err := CompilePattern(`%{HOSTNAME:host}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected HOSTNAME to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`%{HOSTNAME:host}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		"master",
@@ -2510,20 +2118,18 @@ func TestStructuredHostNameMatchesDefaultRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredLogLevelMatchesDefaultRegexp(t *testing.T) {
+func TestGrokLogLevelMatchesDefaultRegexp(t *testing.T) {
 	current, err := CompilePattern(`%{LOGLEVEL:status}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected LOGLEVEL to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`%{LOGLEVEL:status}`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	cases := []string{
 		"alert", "TRACE", "debug", "notice", "INFO",
@@ -2542,7 +2148,7 @@ func TestStructuredLogLevelMatchesDefaultRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredPatternRespectsOverriddenBuiltin(t *testing.T) {
+func TestGrokPatternRespectsOverriddenBuiltin(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["NOTSPACE"] = `[A-Z]+`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -2567,7 +2173,7 @@ func TestStructuredPatternRespectsOverriddenBuiltin(t *testing.T) {
 	}
 }
 
-func TestStructuredPatternRespectsOverriddenLogLevel(t *testing.T) {
+func TestGrokPatternRespectsOverriddenLogLevel(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["LOGLEVEL"] = `(?:panic|fatal)`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -2591,7 +2197,7 @@ func TestStructuredPatternRespectsOverriddenLogLevel(t *testing.T) {
 	}
 }
 
-func TestStructuredAliasedCustomPrimitiveSeesFollowingLiteral(t *testing.T) {
+func TestGrokAliasedCustomPrimitiveSeesFollowingLiteral(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["TOKEN"] = `%{NOTSPACE}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -2603,15 +2209,13 @@ func TestStructuredAliasedCustomPrimitiveSeesFollowingLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected aliased custom primitive to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(`%{TOKEN:name}:%{WORD:status}`, PatternStorage{denorm})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `agent.server.connect:ready`
 	fastRet, fastErr := current.Run(line, true)
@@ -2622,7 +2226,7 @@ func TestStructuredAliasedCustomPrimitiveSeesFollowingLiteral(t *testing.T) {
 	assert.Equal(t, "ready", fastRet[current.nameIndex["status"]])
 }
 
-func TestStructuredAliasedNotSpaceKeepsGreedyLiteralBoundary(t *testing.T) {
+func TestGrokAliasedNotSpaceKeepsGreedyLiteralBoundary(t *testing.T) {
 	patterns := CopyDefalutPatterns()
 	patterns["TOKEN"] = `%{NOTSPACE}`
 	denorm, errs := DenormalizePatternsFromMap(patterns)
@@ -2638,7 +2242,8 @@ func TestStructuredAliasedNotSpaceKeepsGreedyLiteralBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	line := `0::`
 	fastRet, fastErr := current.Run(line, true)
@@ -2649,20 +2254,18 @@ func TestStructuredAliasedNotSpaceKeepsGreedyLiteralBoundary(t *testing.T) {
 	assert.Equal(t, "", fastRet[current.nameIndex["msg"]])
 }
 
-func TestStructuredSingleSpaceEscapeMatchesRegexp(t *testing.T) {
+func TestGrokSingleSpaceEscapeMatchesRegexp(t *testing.T) {
 	current, err := CompilePattern(`left\sright`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected single-space escape pattern to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`left\sright`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range []string{"left right", "left\tright"} {
 		fastRet, fastErr := current.Run(line, true)
@@ -2677,7 +2280,6 @@ func TestRegexpPrefilterAnchoredPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	if g.prefilter == nil {
 		t.Fatal("expected regexp prefilter")
@@ -2705,7 +2307,6 @@ func TestRegexpPrefilterMultilineLineAnchorsDoNotRejectInnerLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	content := "bar\nfoo\nbaz"
 	if g.prefilter != nil {
@@ -2729,7 +2330,6 @@ func TestRegexpPrefilterSkipsFoldedLiteralPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	if g.prefilter != nil && g.prefilter.rejects("foo") {
 		t.Fatal("folded literal prefilter rejected a valid lowercase match")
@@ -2746,7 +2346,6 @@ func TestRegexpPrefilterLiteralSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	anchored.fastMatcher = nil
 
 	if anchored.prefilter == nil {
 		t.Fatal("expected anchored regexp prefilter")
@@ -2776,7 +2375,6 @@ func TestRegexpPrefilterLiteralSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unanchored.fastMatcher = nil
 
 	if unanchored.prefilter == nil {
 		t.Fatal("expected unanchored regexp prefilter")
@@ -2797,7 +2395,6 @@ func TestRegexpPrefilterSkipsCaseInsensitiveLiterals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	if g.prefilter != nil {
 		t.Fatalf("expected no prefilter for case-insensitive literal set, got %#v", g.prefilter)
@@ -2815,7 +2412,6 @@ func TestRegexpPrefilterRequiredLiteralSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	if g.prefilter == nil {
 		t.Fatal("expected regexp prefilter")
@@ -2836,41 +2432,18 @@ func TestRegexpPrefilterRequiredLiteralSequence(t *testing.T) {
 	}
 }
 
-func TestStructuredRequiredLiteralQuickReject(t *testing.T) {
-	g, err := CompilePattern(`^foo%{DATA:mid}bar%{GREEDYDATA:end}baz$`, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected structured fast matcher")
-	}
-	assert.Equal(t, []string{"foo", "bar", "baz"}, g.fastMatcher.required)
-
-	if _, err := g.Run("foobaz", true); err != ErrMismatch {
-		t.Fatalf("expected ErrMismatch, got %v", err)
-	}
-	ret, err := g.Run("fooxbarzzbaz", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, "x", ret[g.nameIndex["mid"]])
-	assert.Equal(t, "zz", ret[g.nameIndex["end"]])
-}
-
-func TestStructuredWrappedParserStepMatchesRegexp(t *testing.T) {
+func TestGrokWrappedParserStepMatchesRegexp(t *testing.T) {
 	current, err := CompilePattern(`\[%{HOSTNAME:node}\]`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected wrapped parser pattern to use structured fast matcher")
 	}
 
 	regexpOnly, err := CompilePattern(`\[%{HOSTNAME:node}\]`, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range []string{"[node-a.example.com]", "[master]"} {
 		fastRet, fastErr := current.Run(line, true)
@@ -2880,7 +2453,7 @@ func TestStructuredWrappedParserStepMatchesRegexp(t *testing.T) {
 	}
 }
 
-func TestStructuredOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(t *testing.T) {
+func TestGrokOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(t *testing.T) {
 	pattern := `\[%{LOGLEVEL:level}\] (\[%{HOSTNAME:node}\] )?\[%{NOTSPACE:tenant}\] %{GREEDYDATA:msg}`
 	lines := []string{
 		`[WARN] [node-a] [tenant-42] rate limiter rejected 3 requests`,
@@ -2891,15 +2464,13 @@ func TestStructuredOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.fastMatcher == nil {
-		t.Fatal("expected optional wrapped parser pattern to use structured fast matcher")
-	}
 
 	regexpOnly, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
+	regexpOnly = rawRegexpCopy(regexpOnly)
 
 	for _, line := range lines {
 		fastRet, fastErr := current.Run(line, true)
@@ -2909,15 +2480,13 @@ func TestStructuredOptionalWrappedParserWithOverlappingNextLiteralMatchesRegexp(
 	}
 }
 
-func TestStructuredFastMatcherSkipsAmbiguousIstioAccessPattern(t *testing.T) {
+func TestGrokFastMatcherSkipsAmbiguousIstioAccessPattern(t *testing.T) {
 	pattern := `\[%{TIMESTAMP_ISO8601:start_time}\] "%{GREEDYDATA:http_method} %{GREEDYDATA:http_path} %{GREEDYDATA:protocol}" %{GREEDYDATA:response_code} %{GREEDYDATA:response_flags} %{GREEDYDATA:response_code_details} %{GREEDYDATA:connection_termination_details} "%{GREEDYDATA:upstream_transport_failure_reason}" %{GREEDYDATA:bytes_received} %{GREEDYDATA:bytes_sent} %{GREEDYDATA:duration} %{GREEDYDATA:resp_upstream_service_time} "%{GREEDYDATA:req_x_forwarded_for}" "%{GREEDYDATA:req_user_agent}" "%{GREEDYDATA:req_x_request_id}" "%{GREEDYDATA:req_authority}" "%{GREEDYDATA:upstream_host}" %{GREEDYDATA:upstream_cluster} %{GREEDYDATA:upstream_local_address} %{GREEDYDATA:downstream_local_address} %{GREEDYDATA:downstream_remote_address} %{GREEDYDATA:requested_server_name} %{GREEDYDATA:route_name}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.fastMatcher != nil {
-		t.Fatal("ambiguous all-greedy access pattern should use regexp path")
-	}
+
 	if g.filter != nil {
 		t.Fatal("ambiguous all-greedy access pattern should skip regexp capture filter")
 	}
@@ -2931,14 +2500,11 @@ func TestStructuredFastMatcherSkipsAmbiguousIstioAccessPattern(t *testing.T) {
 	assert.Equal(t, "12000", ret[g.nameIndex["duration"]])
 }
 
-func TestStructuredFastMatcherSkipsOptionalGreedyRiskPattern(t *testing.T) {
+func TestGrokOptionalGreedyCaptures(t *testing.T) {
 	pattern := `%{TIMESTAMP_ISO8601:time} %{GREEDYDATA:msg}, request: "%{GREEDYDATA:method} %{GREEDYDATA:path} HTTP/%{NUMBER:http_version}", (upstream: "%{GREEDYDATA:upstream}", )?host: "%{NOTSPACE:host}"`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher != nil {
-		t.Fatal("optional multi-greedy pattern should use regexp path")
 	}
 
 	line := `2026-06-02T23:51:30.123Z upstream timed out, request: "GET /api/v1/query HTTP/1.1", upstream: "10.0.0.2:8080", host: "example.com"`
@@ -2979,14 +2545,11 @@ func TestRunToReuseBuffer(t *testing.T) {
 	}
 }
 
-func TestRunWithMetaReportsFastPath(t *testing.T) {
+func TestRunWithMetaReportsRegexp(t *testing.T) {
 	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected fast matcher")
 	}
 
 	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
@@ -2996,10 +2559,10 @@ func TestRunWithMetaReportsFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	assert.Equal(t, "127.0.0.1", ret[g.nameIndex["client_ip"]])
-	assert.Equal(t, RunPathFastPath, meta.Path)
+	assert.Equal(t, RunPathRegexp, meta.Path)
 	assert.Equal(t, FallbackNone, meta.FallbackReason)
 	assert.Equal(t, g.PatternHash(), meta.PatternHash)
-	assert.Greater(t, meta.WorkUnits, 0)
+	assert.Zero(t, meta.WorkUnits)
 }
 
 func TestRunWithMetaReportsFastPathDisabled(t *testing.T) {
@@ -3018,92 +2581,7 @@ func TestRunWithMetaReportsFastPathDisabled(t *testing.T) {
 	}
 	assert.Equal(t, "GET", ret[g.nameIndex["http_method"]])
 	assert.Equal(t, RunPathRegexp, meta.Path)
-	assert.Equal(t, FallbackFastPathDisabled, meta.FallbackReason)
-}
-
-func TestFastPathBudgetExceededDoesNotDisableMatcher(t *testing.T) {
-	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
-	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.FastPathDisabled() {
-		t.Fatal("fast path should start enabled")
-	}
-
-	dst := make([]string, g.MatchCount())
-	budget := matchBudget{remain: 0}
-	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
-	if g.fastMatcher.match(dst, line, true, &budget) {
-		t.Fatal("fast matcher should not complete with zero budget")
-	}
-	if !budget.exceeded {
-		t.Fatal("expected budget to be marked exceeded")
-	}
-	if g.FastPathDisabled() {
-		t.Fatal("budget excess should not disable fast path for future runs")
-	}
-
-	var meta RunMeta
-	ret, err := g.RunWithMeta(line, true, &meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, "127.0.0.1", ret[g.nameIndex["client_ip"]])
-	assert.Equal(t, RunPathFastPath, meta.Path)
-	if g.FastPathDisabled() {
-		t.Fatal("successful fast path should remain enabled")
-	}
-}
-
-func TestStructuredFastPathBudgetExceeded(t *testing.T) {
-	pattern := `%{NOTSPACE:client_ip} %{NOTSPACE:http_ident} %{NOTSPACE:http_auth} \[%{HTTPDATE:time}\] "%{DATA:http_method} %{GREEDYDATA:http_url} HTTP/%{NUMBER:http_version}" %{INT:status_code} %{INT:bytes}`
-	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected fast matcher")
-	}
-
-	dst := make([]string, g.MatchCount())
-	line := `127.0.0.1 - - [21/Jul/2021:14:14:38 +0800] "GET /?1 HTTP/1.1" 200 2178`
-	budget := matchBudget{remain: 0}
-	if g.fastMatcher.match(dst, line, true, &budget) {
-		t.Fatal("fast matcher should not complete with zero budget")
-	}
-	if !budget.exceeded {
-		t.Fatal("expected budget to be marked exceeded")
-	}
-}
-
-func TestStructuredMatchBudgetIsCapped(t *testing.T) {
-	budget := newStructuredMatchBudget(structuredBudgetMax, 1024)
-	if budget.remain != structuredBudgetMax {
-		t.Fatalf("expected capped budget %d, got %d", structuredBudgetMax, budget.remain)
-	}
-}
-
-func TestStructuredBacktrackingScanConsumesInputBudget(t *testing.T) {
-	pattern := `%{GREEDYDATA:first} X %{GREEDYDATA:second} Y`
-	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.fastMatcher == nil {
-		t.Fatal("expected fast matcher")
-	}
-	if !g.fastMatcher.backtracking {
-		t.Fatal("expected backtracking matcher")
-	}
-
-	line := strings.Repeat("part X ", 512) + "tail Z"
-	dst := make([]string, g.MatchCount())
-	budget := matchBudget{remain: scanWorkUnits(len(line)) / 2}
-	g.fastMatcher.match(dst, line, true, &budget)
-	if !budget.exceeded {
-		t.Fatal("expected backtracking scan to consume input budget")
-	}
+	assert.Equal(t, FallbackNone, meta.FallbackReason)
 }
 
 func TestRunWithTypeInfoToReuseBuffer(t *testing.T) {
@@ -3268,7 +2746,6 @@ func BenchmarkRunCommonApacheLogRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `127.0.0.1 - - [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`
 	b.ResetTimer()
@@ -3345,7 +2822,6 @@ func BenchmarkRunWithTypeInfoRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := "1 true 1.1"
 	b.ResetTimer()
@@ -3386,7 +2862,6 @@ func BenchmarkRunWithTypeInfoStructuredCommonRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `time=2026-04-22T10:11:12.123+08:00 status=200 duration=12.4 ok=true bytes=532 msg="request completed"`
 	b.ResetTimer()
@@ -3429,7 +2904,6 @@ func BenchmarkRunWithTypeInfoPipelineAccessRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `10.0.0.8 - - [22/Apr/2026:10:11:12 +0800] "GET /api/orders?id=42 HTTP/1.1" 200 532`
 	b.ResetTimer()
@@ -3464,17 +2938,13 @@ func BenchmarkStructuredBoundedRepeatPatterns(b *testing.B) {
 		if err != nil {
 			b.Fatalf("%s compile fast matcher: %v", tc.name, err)
 		}
-		if fast.fastMatcher == nil {
-			b.Fatalf("%s expected structured fast matcher", tc.name)
-		}
 
 		regexpOnly, err := CompilePattern(tc.pattern, PatternStorage{defalutDenormalizedPatterns})
 		if err != nil {
 			b.Fatalf("%s compile regexp matcher: %v", tc.name, err)
 		}
-		regexpOnly.fastMatcher = nil
 
-		b.Run(tc.name+"/fast", func(b *testing.B) {
+		b.Run(tc.name+"/grok", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fast.Run(tc.line, true)
@@ -3508,7 +2978,6 @@ func BenchmarkRegexpPrefilterTailMismatch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	current.fastMatcher = nil
 
 	noPrefilter := *current
 	noPrefilter.prefilter = nil
@@ -3732,7 +3201,6 @@ func BenchmarkRunStructuredCompositeRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php HTTP/1.1" 404 207`
 	b.ResetTimer()
@@ -3775,7 +3243,6 @@ func BenchmarkRunStructuredSQLServerRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `2024-06-21 09:14:18.123+00:00 sqlservr        Error: login failed for user test`
 	b.ResetTimer()
@@ -3818,7 +3285,6 @@ func BenchmarkRunStructuredNginxAccessRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `127.0.0.1 - admin [23/Apr/2014:22:58:32 +0200] "GET /index.php?a=1 HTTP/1.1" 404 207`
 	b.ResetTimer()
@@ -3839,9 +3305,6 @@ func BenchmarkRunAmbiguousIstioAccessRegexpFallback(b *testing.B) {
 	g, err := CompilePattern(pattern, PatternStorage{defalutDenormalizedPatterns})
 	if err != nil {
 		b.Fatal(err)
-	}
-	if g.fastMatcher != nil {
-		b.Fatal("ambiguous all-greedy access pattern should use regexp path")
 	}
 
 	line := `[2026-06-02T23:51:30.123Z] "GET /api/v1/query?x=1 HTTP/1.1" 200 - via_upstream - "-" 0 1234 12000 11 "10.0.0.1" "curl/8.0" "req-1" "example.com" "10.0.0.2:8080" outbound|8080||svc.ns.svc.cluster.local 10.0.0.3:39000 10.0.0.4:8080 10.0.0.5:56789 - default`
@@ -3886,7 +3349,6 @@ func BenchmarkRunStructuredLogLevelRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `2024-06-21 09:14:18+00:00 [error] database connection failed`
 	b.ResetTimer()
@@ -3929,7 +3391,6 @@ func BenchmarkRunStructuredLogLevelUTFRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := "2024-06-21 09:14:18+00:00 [INFO] 中文告警：磁盘空间不足，当前剩余空间 3%"
 	b.ResetTimer()
@@ -3972,7 +3433,6 @@ func BenchmarkRunStructuredSyslogLineRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := `Sep 18 19:30:23 derrick-ThinkPad-X230 consul[11803]: agent.server.connect: initialized primary datacenter`
 	b.ResetTimer()
@@ -4012,7 +3472,6 @@ func BenchmarkRunStructuredShortMismatchRegexpPath(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	line := "x"
 	b.ResetTimer()
@@ -4031,7 +3490,6 @@ func BenchmarkRunRegexpPrefilterLiteralSetMismatch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	withPrefilter := *g
 	withoutPrefilter := *g
@@ -4065,7 +3523,6 @@ func BenchmarkRunRegexpPrefilterRequiredLiteralMismatch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g.fastMatcher = nil
 
 	withPrefilter := *g
 	withoutPrefilter := *g

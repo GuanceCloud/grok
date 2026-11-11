@@ -118,7 +118,8 @@ func TestAccessPatternsSearchAndTypedParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s compile regexp: %v", tc.name, err)
 		}
-		regexpOnly.fastMatcher = nil
+		regexpOnly = rawRegexpCopy(regexpOnly)
+
 		for idx, line := range tc.lines {
 			t.Run(tc.name+"/mut_"+string(rune('a'+idx)), func(t *testing.T) {
 				assertRunParity(t, current, regexpOnly, line, true)
@@ -165,7 +166,7 @@ func loadTypedMutationFixtures(t testing.TB) []typedMutationFixture {
 		if err != nil {
 			t.Fatalf("%s compile regexp: %v", tc.name, err)
 		}
-		regexpOnly.fastMatcher = nil
+		regexpOnly = rawRegexpCopy(regexpOnly)
 
 		fixtures = append(fixtures, typedMutationFixture{
 			name:       tc.name,
