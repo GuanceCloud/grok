@@ -50,17 +50,13 @@ capture extraction, and casting semantics.
 
 ### Match path
 
-- [structured_fastpath.go](../../structured_fastpath.go): structured matcher, parser logic, fast path compilation
-- [anchored_dissect.go](../../anchored_dissect.go): root-package compatibility wrapper for the anchored runner
-- [internal/match/anchored.go](../../internal/match/anchored.go): anchored linear/dissect-style runner implementation
-- [internal/match/model.go](../../internal/match/model.go): shared match-layer model types and enums
-- [internal/match/ir.go](../../internal/match/ir.go): shared match-layer IR helpers
-- [matcher_helpers.go](../../matcher_helpers.go): token validators and parser helpers
+- [grok.go](../../grok.go): regexp execution, capture extraction, type conversion and reusable buffers
+- Go `regexp` is the only matching engine; structured parsers and runners have been removed.
 
 ### Validation and performance
 
 - [grok_test.go](../../grok_test.go): unit tests and micro-benchmarks
-- [mutation_parity_test.go](../../mutation_parity_test.go): fast-path vs regexp parity checks
+- [mutation_parity_test.go](../../mutation_parity_test.go): regexp and prefilter parity checks
 - [fuzz_fastpath_test.go](../../fuzz_fastpath_test.go): fuzz parity targets
 - [datakit_pipeline_test.go](../../datakit_pipeline_test.go): real pipeline fixtures and dispatch benchmarks
 - [common_patterns_test.go](../../common_patterns_test.go): composed-pattern coverage
@@ -85,7 +81,7 @@ That translates to the following roadmap:
 
 1. Build a shared `atom scanner` and move `MatcherSet` off repeated `strings.Contains`.
 2. Compile current prefilter logic into a dedicated `filter IR`.
-3. Keep expanding `anchored dissect runner` for safe linear patterns.
+3. Keep matching and capture behavior consistent with Go `regexp`.
 4. Treat Hyperscan and future SIMD/JIT work as optional backends under the scan/filter layer.
 
 ## Directory Rules

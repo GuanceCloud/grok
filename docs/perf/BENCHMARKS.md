@@ -1,3 +1,8 @@
+> Historical note: the structured fast path described in this document has
+> been removed. Current execution uses Go `regexp` exclusively. The following
+> snapshots document the previous implementation, not current performance or
+> a plan to restore structured matching. See the README for compatibility.
+
 # Benchmark Snapshot
 
 This file records the current performance baseline for `feat-best`. It compares

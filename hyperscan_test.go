@@ -1,5 +1,3 @@
-//go:build !hyperscan || !cgo
-
 package grok
 
 import "testing"

@@ -143,7 +143,7 @@ func loadCommonPatternFixtures(t testing.TB) []commonPatternFixture {
 		if err != nil {
 			t.Fatalf("%s compile regexp: %v", tc.name, err)
 		}
-		regexpOnly.fastMatcher = nil
+		regexpOnly = rawRegexpCopy(regexpOnly)
 
 		fixtures = append(fixtures, commonPatternFixture{
 			name:       tc.name,
@@ -162,11 +162,8 @@ func TestCommonComposedPatternsMatchRegexp(t *testing.T) {
 		t.Fatal("expected common pattern fixtures")
 	}
 
-	fastCount := 0
 	for _, fixture := range fixtures {
-		if fixture.current.fastMatcher != nil {
-			fastCount++
-		}
+
 		fastRet, fastErr := fixture.current.Run(fixture.line, true)
 		regexpRet, regexpErr := fixture.regexpOnly.Run(fixture.line, true)
 		if !reflect.DeepEqual(fastRet, regexpRet) || fastErr != regexpErr {
@@ -180,9 +177,6 @@ func TestCommonComposedPatternsMatchRegexp(t *testing.T) {
 		}
 	}
 
-	if fastCount < len(fixtures)/2 {
-		t.Fatalf("expected at least half of common patterns to use fast matcher, got %d/%d", fastCount, len(fixtures))
-	}
 }
 
 func TestCommonComposedPatternsWithTypeInfoMatchRegexp(t *testing.T) {
@@ -198,15 +192,14 @@ func TestCommonComposedPatternsWithTypeInfoMatchRegexp(t *testing.T) {
 	}
 }
 
-func TestControllerRuntimePatternUsesFastMatcher(t *testing.T) {
+func TestControllerRuntimePattern(t *testing.T) {
 	fixtures := loadCommonPatternFixtures(t)
 	for _, fixture := range fixtures {
 		if fixture.name != "k8s_controller_runtime" {
 			continue
 		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatal("expected controller-runtime pattern to use structured fast matcher")
-		}
+
+		assertRunParity(t, fixture.current, rawRegexpCopy(fixture.regexpOnly), fixture.line, true)
 		return
 	}
 	t.Fatal("expected controller-runtime fixture")
@@ -218,9 +211,7 @@ func TestCustomAliasNginxErrorUsesRunner(t *testing.T) {
 		if fixture.name != "custom_alias_nginx_error" {
 			continue
 		}
-		if fixture.current.fastMatcher == nil || fixture.current.fastMatcher.nginxErrorRunner == nil {
-			t.Fatalf("expected custom nginx error pattern to use nginx error runner")
-		}
+
 		lines := []string{
 			fixture.line,
 			`2026/04/22 10:11:12 [error] upstream timed out while reading response header from upstream, client: 10.0.0.8, server: gateway.local, request: "GET /api/orders HTTP/1.1", host: "demo.local"`,
@@ -240,12 +231,7 @@ func TestCustomAliasPostfixUsesRunner(t *testing.T) {
 		if fixture.name != "custom_alias_postfix" {
 			continue
 		}
-		if fixture.current.fastMatcher == nil {
-			t.Fatalf("expected custom postfix pattern to use fast matcher")
-		}
-		if fixture.current.fastMatcher.postfixRunner == nil {
-			t.Fatalf("expected custom postfix pattern to use postfix runner, steps=%s", describeStructuredMatcherSteps(fixture.current.fastMatcher))
-		}
+
 		lines := []string{
 			fixture.line,
 			`prefix Apr  2 10:11:12 mail-01 postfix[12345]: 3F4A2BC901: queued`,
@@ -269,7 +255,7 @@ func BenchmarkCommonComposedPatternsWithTypeInfo(b *testing.B) {
 
 	for _, fixture := range fixtures {
 		fixture := fixture
-		b.Run(fixture.name+"/fast", func(b *testing.B) {
+		b.Run(fixture.name+"/grok", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.current.RunWithTypeInfo(fixture.line, true)
@@ -305,7 +291,7 @@ func BenchmarkCommonComposedPatterns(b *testing.B) {
 
 	for _, fixture := range fixtures {
 		fixture := fixture
-		b.Run(fixture.name+"/fast", func(b *testing.B) {
+		b.Run(fixture.name+"/grok", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				ret, err := fixture.current.Run(fixture.line, true)

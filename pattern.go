@@ -426,7 +426,6 @@ func compileDenormalizedPattern(gP *GrokPattern, storage PatternStorageIface) (*
 		subMatchNames:    meta.subMatchNames,
 		nameIndex:        meta.nameIndex,
 		valueKinds:       valueKinds,
-		fastMatcher:      buildFastMatcher(gP, storage, meta),
 		prefilter:        meta.prefilter,
 		multiFilter:      meta.multiFilter,
 		requiredPrefix:   requiredPrefix,

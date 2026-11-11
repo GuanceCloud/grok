@@ -8,6 +8,10 @@ import (
 	"sync"
 )
 
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
 type grokIRKind uint8
 
 const (

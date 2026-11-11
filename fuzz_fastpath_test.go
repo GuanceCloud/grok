@@ -11,7 +11,7 @@ func FuzzStructuredApacheErrorParity(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	regexpOnly.fastMatcher = nil
+
 	regexpOnly.prefilter = nil
 
 	for _, seed := range []string{
@@ -127,7 +127,6 @@ func FuzzRegexpPrefilterLiteralSetParity(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	current.fastMatcher = nil
 
 	regexpOnly := *current
 	regexpOnly.prefilter = nil
@@ -161,7 +160,7 @@ func mustDatakitFixtureByName(t testing.TB, name string) datakitMatchedFixture {
 
 func rawRegexpCopy(g *GrokRegexp) *GrokRegexp {
 	copy := *g
-	copy.fastMatcher = nil
+
 	copy.prefilter = nil
 	return &copy
 }
